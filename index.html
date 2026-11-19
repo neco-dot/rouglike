@@ -1,0 +1,1697 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>夜行圆球 · 进化版</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='%234aa9b6'/%3E%3Ccircle cx='12.5' cy='14' r='2.2' fill='%23f4ead3'/%3E%3Ccircle cx='19' cy='14' r='2.2' fill='%23f4ead3'/%3E%3C/svg%3E">
+<style>
+  :root { --ink: #0a0906; --paper: #f4ead3; --gold: #f0cf7a; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; background: #070605; overflow: hidden;
+    font-family: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
+    color: var(--paper);
+    -webkit-tap-highlight-color: transparent;
+  }
+  .wrap {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(circle at 50% 45%, #14110c 0%, #070605 72%);
+  }
+  canvas {
+    display: block;
+    width: min(96vw, calc(92vh * 4 / 3));
+    height: auto;
+    aspect-ratio: 4 / 3;
+    background: var(--ink);
+    box-shadow: 0 0 0 1px #2c261b, 0 24px 60px rgba(0,0,0,.65);
+    touch-action: none;
+  }
+  .hint {
+    position: fixed; left: 0; right: 0; bottom: max(6px, env(safe-area-inset-bottom));
+    text-align: center; font-size: 12px; letter-spacing: .06em;
+    color: #6d6552; pointer-events: none; user-select: none;
+  }
+  .hint b { color: #9d9276; font-weight: 500; }
+</style>
+</head>
+<body>
+<div class="wrap"><canvas id="cv" width="640" height="480"></canvas></div>
+<div class="hint">方向键 / <b>W A S D</b> 移动 · <b>回车</b> 确认 · <b>← →</b> 换卡 · <b>Esc</b> 暂停 · 也可直接点画面走</div>
+<script>
+"use strict";
+/* ============================================================
+   夜行圆球 · 进化版 —— 单文件网页版（JS 主体）
+   逻辑分辨率 640x480，全部 Canvas 手绘，零外部依赖
+   ============================================================ */
+
+const W = 640, H = 480, TS = 32, WT = 160, HT = 120;
+const cv = document.getElementById("cv");
+let ctx = cv.getContext("2d");   // 会临时切到像素层
+
+/* ---------- 小工具 ---------- */
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const lerp = (a, b, t) => a + (b - a) * t;
+const rnd = (a, b) => a + Math.random() * (b - a);
+const rndi = (a, b) => Math.floor(rnd(a, b + 1));
+const dist2 = (ax, ay, bx, by) => (ax - bx) * (ax - bx) + (ay - by) * (ay - by);
+const TAU = Math.PI * 2;
+
+function h2(x, y, s) {
+  let h = (x * 73856093) ^ (y * 19349663) ^ (s * 83492791);
+  h ^= h >>> 13; h = (h * 1540483477) | 0; h ^= h >>> 15;
+  return Math.abs(h) >>> 0;
+}
+
+/* ---------- 音效（WebAudio 实时合成） ---------- */
+let AC = null, master = null;
+const lastPlay = Object.create(null);
+function audioInit() {
+  if (AC) return;
+  try {
+    AC = new (window.AudioContext || window.webkitAudioContext)();
+    master = AC.createGain();
+    master.gain.value = 0.6;
+    master.connect(AC.destination);
+  } catch (e) { AC = null; }
+}
+function tone(freq, dur, type, gain, freq2, delay) {
+  if (!AC) return;
+  const t0 = AC.currentTime + (delay || 0);
+  const o = AC.createOscillator();
+  const g = AC.createGain();
+  o.type = type || "sine";
+  o.frequency.setValueAtTime(freq, t0);
+  if (freq2) o.frequency.exponentialRampToValueAtTime(Math.max(20, freq2), t0 + dur);
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.linearRampToValueAtTime(gain == null ? 0.2 : gain, t0 + Math.min(0.02, dur));
+  g.gain.exponentialRampToValueAtTime(0.0006, t0 + dur);
+  o.connect(g); g.connect(master);
+  o.start(t0); o.stop(t0 + dur + 0.03);
+}
+function noise(dur, gain, freq, delay) {
+  if (!AC) return;
+  const n = Math.floor(AC.sampleRate * dur);
+  const buf = AC.createBuffer(1, n, AC.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+  const src = AC.createBufferSource(); src.buffer = buf;
+  const bp = AC.createBiquadFilter(); bp.type = "bandpass";
+  bp.frequency.value = freq || 900; bp.Q.value = 0.8;
+  const g = AC.createGain(); g.gain.value = gain == null ? 0.15 : gain;
+  g.gain.exponentialRampToValueAtTime(0.0004, AC.currentTime + dur);
+  src.connect(bp); bp.connect(g); g.connect(master);
+  src.start(AC.currentTime + (delay || 0));
+}
+function sfx(name) {
+  if (!AC) return;
+  const now = performance.now() / 1000;
+  const gap = name === "kill" ? 0.05 : name === "swing" ? 0.10 : 0.03;
+  if (lastPlay[name] && now - lastPlay[name] < gap) return;
+  lastPlay[name] = now;
+  switch (name) {
+    case "swing": noise(0.15, 0.12, 1500); break;
+    case "coin": tone(880, 0.10, "triangle", 0.14, 1320); break;
+    case "talisman": tone(520, 0.08, "sine", 0.09, 700); break;
+    case "lamp": tone(320, 0.30, "sine", 0.12, 470); tone(660, 0.20, "triangle", 0.05, 780, 0.02); break;
+    case "bell": tone(1180, 0.34, "sine", 0.13, 700); tone(1770, 0.26, "sine", 0.07, 1100, 0.01); break;
+    case "crane": tone(1000, 0.12, "sine", 0.09, 1500); break;
+    case "ink": noise(0.20, 0.13, 520); tone(220, 0.18, "sine", 0.09, 120); break;
+    case "kill": noise(0.08, 0.09, 2200); break;
+    case "pick": tone(1320, 0.07, "sine", 0.08, 1700); break;
+    case "hurt": tone(180, 0.22, "sawtooth", 0.15, 90); noise(0.12, 0.10, 600); break;
+    case "level": tone(523, 0.16, "triangle", 0.15, 784); tone(784, 0.22, "triangle", 0.11, 1046, 0.10); break;
+    case "ui": tone(720, 0.06, "square", 0.05, 900); break;
+    case "evo": tone(392, 0.26, "triangle", 0.13, 784); tone(784, 0.34, "sine", 0.11, 1174, 0.10); break;
+    case "boss": tone(110, 0.9, "sawtooth", 0.16, 55); tone(220, 0.7, "sine", 0.09, 110, 0.05); break;
+    case "die": tone(300, 0.5, "sawtooth", 0.15, 60); break;
+    case "win": [523, 659, 784, 1046].forEach((f, i) => tone(f, 0.3, "triangle", 0.12, f, i * 0.14)); break;
+  }
+}
+
+/* ---------- 输入 ---------- */
+const input = { ok: false, back: false, left: false, right: false, esc: false };
+const keys = Object.create(null);
+const touch = { active: false, x: 0, y: H / 2 };
+
+addEventListener("keydown", (e) => {
+  const k = e.key;
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " ", "Enter", "Backspace"].includes(k)) e.preventDefault();
+  if (!keys[k]) {
+    if (k === "Enter" || k === " " || k === "z" || k === "Z") input.ok = true;
+    if (k === "ArrowLeft" || k === "a" || k === "A") input.left = true;
+    if (k === "ArrowRight" || k === "d" || k === "D") input.right = true;
+    if (k === "x" || k === "X" || k === "Backspace") input.back = true;
+    if (k === "Escape") input.esc = true;
+    audioInit();
+    if (AC && AC.state === "suspended") AC.resume();
+  }
+  keys[k] = true;
+}, { passive: false });
+addEventListener("keyup", (e) => { keys[e.key] = false; });
+addEventListener("blur", () => { for (const k in keys) keys[k] = false; touch.active = false; });
+
+function localPoint(e) {
+  const r = cv.getBoundingClientRect();
+  const cx = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
+  const cy = (e.touches ? e.touches[0].clientY : e.clientY) - r.top;
+  return { x: cx / r.width * W, y: cy / r.height * H };
+}
+function onPress(e) {
+  if (e.preventDefault) e.preventDefault();
+  audioInit();
+  if (AC && AC.state === "suspended") AC.resume();
+  const p = localPoint(e);
+  input.ok = true;
+  if (g.state === "level") {
+    for (let i = 0; i < 3; i++) {
+      const bx = 30 + i * 194, by = 104, bw = 182, bh = 210;
+      if (p.x >= bx && p.x <= bx + bw && p.y >= by && p.y <= by + bh) { g.chs = i; pickCard(); }
+    }
+  } else if (g.state === "play") {
+    touch.active = true; touch.x = p.x; touch.y = p.y;
+  }
+}
+cv.addEventListener("mousedown", onPress);
+cv.addEventListener("touchstart", onPress, { passive: false });
+cv.addEventListener("mousemove", (e) => {
+  if (!touch.active) return;
+  const p = localPoint(e); touch.x = p.x; touch.y = p.y;
+});
+cv.addEventListener("mouseup", () => { touch.active = false; });
+cv.addEventListener("touchmove", (e) => {
+  e.preventDefault();
+  const p = localPoint(e); touch.x = p.x; touch.y = p.y;
+}, { passive: false });
+cv.addEventListener("touchend", (e) => { e.preventDefault(); touch.active = false; }, { passive: false });
+cv.addEventListener("mouseleave", () => { touch.active = false; });
+
+function clearEdge() {
+  input.ok = input.back = input.left = input.right = input.esc = false;
+}
+
+/* ---------- 全局状态 ---------- */
+const g = {
+  state: "title", t: 0, anim: 0, kills: 0, level: 1, xp: 0, xpneed: 4,
+  hp: 130, hp0: 130,
+  camx: 0, camy: 0, shx: 0, shy: 0, shake: 0, flash: 0, iframe: 0,
+  chs: 0, choice: [0, 0, 0], card: [{ k: 0, i: 0 }, { k: 0, i: 0 }, { k: 0, i: 0 }],
+  tip: "", tipT: 0, bossSpawned: false, evoFlash: 0, evoName: "",
+  dmgMul: 1, spdMul: 1, magnet: 64, seed: Math.floor(Math.random() * 1e9),
+  wown: new Array(7).fill(false), wlvl: new Array(7).fill(0), wevo: new Array(7).fill(false),
+  wcd: new Array(7).fill(0), orb: 0, talTick: 0,
+  padPrevA: false, padPrevB: false, padA: false, padB: false,
+  padX: 0, padY: 0,
+};
+
+const P = { x: 0, y: 0, r: 10, ang: 0, dirX: 0, dirY: 0 };
+
+const WP_COUNT = 7;
+const WNAME = ["剑光", "铜钱镖", "符纸环绕", "长明灯", "铜铃", "纸鹤", "墨滴"];
+const WEVONAME = ["月华斩", "万钱阵", "符阵流转", "灯王长明", "钟鸣不止", "群鹤归巢", "泼墨成山"];
+const WCOLS = ["#efe6cd", "#e8bd66", "#a483dc", "#f2a761", "#c6d2de", "#f2e8d2", "#8ba1c0"];
+const ATTRS = [
+  { n: "开刃", d: "伤害 +20%", c: "#d8b45a" },
+  { n: "轻身", d: "移动 +12%", c: "#8fc46a" },
+  { n: "厚皮", d: "血上限 +30", c: "#c0392b" },
+  { n: "吸星", d: "拾取范围 +40", c: "#6fbfcf" },
+];
+/* 卡片编码：0-6 新武器，7-13 升级，14-20 进化，21-24 属性 */
+const CH_NEW = (w) => w;
+const CH_UP = (w) => 7 + w;
+const CH_EVO = (w) => 14 + w;
+const CH_ATTR = (s) => 21 + s;
+
+let world = new Uint8Array(WT * HT);
+const enemies = [];
+const bullets = [];
+const pickups = [];
+const slashes = [];
+const pulses = [];
+const parts = [];
+const floats = [];
+const orbs = [];
+
+/* PART2 */
+
+/* ============================================================
+   PART2 —— 世界生成 / 开局 / 基础更新
+   ============================================================ */
+
+const tileAt = (tx, ty) => {
+  if (tx < 0 || ty < 0 || tx >= WT || ty >= HT) return 1;
+  return world[ty * WT + tx];
+};
+const solidAt = (x, y) => tileAt(Math.floor(x / TS), Math.floor(y / TS)) !== 0;
+
+function genWorld() {
+  world.fill(1);
+  const rooms = [];
+  for (let i = 0; i < 40 && rooms.length < 13; i++) {
+    const w = rndi(6, 13), h = rndi(5, 10);
+    const x = rndi(6, WT - w - 6), y = rndi(6, HT - h - 6);
+    let bad = false;
+    for (const r of rooms) {
+      if (x < r.x + r.w + 3 && x + w + 3 > r.x && y < r.y + r.h + 3 && y + h + 3 > r.y) { bad = true; break; }
+    }
+    if (bad) continue;
+    rooms.push({ x, y, w, h });
+  }
+  if (!rooms.length) rooms.push({ x: 40, y: 30, w: 12, h: 9 });
+
+  for (const r of rooms) {
+    for (let ty = r.y; ty < r.y + r.h; ty++)
+      for (let tx = r.x; tx < r.x + r.w; tx++)
+        world[ty * WT + tx] = 0;
+  }
+  for (let i = 1; i < rooms.length; i++) {
+    const a = rooms[i - 1], b = rooms[i];
+    const ax = Math.floor(a.x + a.w / 2), ay = Math.floor(a.y + a.h / 2);
+    const bx = Math.floor(b.x + b.w / 2), by = Math.floor(b.y + b.h / 2);
+    const x0 = Math.min(ax, bx), x1 = Math.max(ax, bx);
+    const y0 = Math.min(ay, by), y1 = Math.max(ay, by);
+    for (let tx = x0; tx <= x1; tx++) {
+      world[ay * WT + tx] = 0;
+      if (ay - 1 > 0) world[(ay - 1) * WT + tx] = 0;
+    }
+    for (let ty = y0; ty <= y1; ty++) {
+      world[ty * WT + bx] = 0;
+      if (bx - 1 > 0) world[ty * WT + bx - 1] = 0;
+    }
+  }
+  for (let k = 0; k < 20; k++) {
+    const tx = rndi(10, WT - 11), ty = rndi(10, HT - 11);
+    if (world[ty * WT + tx] === 0 && Math.random() < 0.14) {
+      world[ty * WT + tx] = 1;
+      if (Math.random() < 0.5 && ty + 1 < HT) world[(ty + 1) * WT + tx] = 1;
+    }
+  }
+  return rooms;
+}
+
+/* ---------- 伤害 / 粒子 ---------- */
+function addFloat(x, y, txt, col, big) {
+  if (floats.length > 70) floats.shift();
+  floats.push({ x, y, txt, col: col || "#f4ead3", life: 0.8, max: 0.8, big: !!big });
+}
+function addParts(x, y, n, col, spd, size) {
+  for (let i = 0; i < n; i++) {
+    if (parts.length > 320) parts.shift();
+    const a = rnd(0, TAU), v = rnd(spd * 0.35, spd);
+    parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: rnd(0.22, 0.55), max: 0.55, col, size: size || 2 });
+  }
+}
+function addRing(x, y, r, col, life) {
+  if (pulses.length > 40) pulses.shift();
+  pulses.push({ x, y, r, col, life: life || 0.34, max: life || 0.34 });
+}
+
+function damageEnemy(e, dmg) {
+  if (!e.alive) return;
+  const v = Math.max(1, Math.round(dmg * g.dmgMul));
+  e.hp -= v;
+  addFloat(e.x + rnd(-5, 5), e.y - e.r - 5, String(v), "#f4ead3", false);
+  addParts(e.x, e.y, 3, "#d8c9a8", 80, 2);
+  if (e.hp <= 0) {
+    e.alive = false;
+    g.kills++;
+    sfx("kill");
+    addParts(e.x, e.y, 10, e.type === 4 ? "#e8c8ff" : "#bfae8f", 140, 3);
+    addRing(e.x, e.y, e.r + 6, "#fdf6e3", 0.22);
+    if (e.type === 4) {
+      for (let i = 0; i < 9; i++) pickups.push({ x: e.x + rnd(-20, 20), y: e.y + rnd(-20, 20), xp: 6, life: 9 });
+      g.flash = 0.55; g.state = "win"; sfx("win");
+    } else {
+      pickups.push({ x: e.x + rnd(-3, 3), y: e.y + rnd(-3, 3), xp: [1, 2, 4, 3, 30][e.type], life: 22 });
+    }
+  }
+}
+
+/* ---------- 开局 ---------- */
+function newRun() {
+  const rooms = genWorld();
+  const r0 = rooms[0];
+  P.x = (r0.x + r0.w / 2) * TS;
+  P.y = (r0.y + r0.h / 2) * TS;
+  P.ang = 0;
+
+  enemies.length = 0; bullets.length = 0; pickups.length = 0;
+  slashes.length = 0; pulses.length = 0; parts.length = 0; floats.length = 0;
+
+  g.state = "play"; g.t = 0; g.anim = 0; g.kills = 0; g.level = 1;
+  g.hp = 130; g.hp0 = 130; g.xp = 0; g.xpneed = 4;
+  g.shake = 0; g.flash = 0; g.iframe = 0; g.bossSpawned = false;
+  g.dmgMul = 1; g.spdMul = 1; g.magnet = 64;
+  g.wown = new Array(7).fill(false);
+  g.wlvl = new Array(7).fill(0);
+  g.wevo = new Array(7).fill(false);
+  g.wcd = new Array(7).fill(0);
+  g.orb = 0; g.talTick = 0; g.evoFlash = 0; g.spawnAcc = 0;
+  g.wown[0] = true; g.wlvl[0] = 1;
+
+  g.camx = clamp(P.x - W / 2, 0, WT * TS - W);
+  g.camy = clamp(P.y - H / 2, 0, HT * TS - H);
+  g.tip = "剑光先挂在身上，拣光点升级"; g.tipT = 4;
+}
+
+function tip(txt, sec) { g.tip = txt; g.tipT = sec || 3; }
+
+/* ---------- 敌人 ---------- */
+const ETYPE = [
+  { hp: 9, spd: 44, r: 9, dmg: 4, col: "#a89b86" },
+  { hp: 15, spd: 66, r: 9, dmg: 5, col: "#8fc46a" },
+  { hp: 34, spd: 36, r: 14, dmg: 9, col: "#b4a68c" },
+  { hp: 20, spd: 30, r: 10, dmg: 6, col: "#c0793b" },
+  { hp: 950, spd: 42, r: 26, dmg: 16, col: "#a05ad0" },
+];
+
+function spawnEnemy(type, x, y) {
+  const t = ETYPE[type];
+  const hpScale = 1 + Math.min(2.0, g.t / 280);
+  const hp = Math.round(t.hp * hpScale);
+  enemies.push({
+    x, y, type, r: t.r, col: t.col, hp, hp0: hp,
+    spd: t.spd * (1 + Math.min(0.35, g.t / 900)),
+    dmg: t.dmg, slow: 0, slowmul: 1, alive: true, wob: rnd(0, TAU),
+  });
+}
+
+function spawnAround(type) {
+  for (let i = 0; i < 30; i++) {
+    const a = rnd(0, TAU), d = rnd(280, 380);
+    const x = P.x + Math.cos(a) * d, y = P.y + Math.sin(a) * d;
+    if (x < TS + 8 || y < TS + 8 || x > WT * TS - TS - 8 || y > HT * TS - TS - 8) continue;
+    if (solidAt(x, y) || solidAt(x + 12, y) || solidAt(x - 12, y)) continue;
+    spawnEnemy(type, x, y);
+    return true;
+  }
+  return false;
+}
+
+function spawnTick(dt) {
+  const rate = 0.55 + g.t * 0.012;
+  g.spawnAcc += dt * rate;
+  while (g.spawnAcc >= 1) {
+    g.spawnAcc -= 1;
+    if (enemies.length > 105) break;
+    const p = Math.random();
+    let type = 0;
+    if (g.t > 45 && p < 0.30) type = 1;
+    else if (g.t > 95 && p < 0.18) type = 2;
+    else if (g.t > 150 && p < 0.13) type = 3;
+    if (g.t < 25) type = 0;
+    spawnAround(type);
+  }
+  if (!g.bossSpawned && g.t >= 360) {
+    g.bossSpawned = true;
+    if (!spawnAround(4)) {
+      for (let k = 0; k < 200; k++) {
+        const a = rnd(0, TAU), dd = rnd(300, 460);
+        const x = clamp(P.x + Math.cos(a) * dd, TS, WT * TS - TS);
+        const y = clamp(P.y + Math.sin(a) * dd, TS, HT * TS - TS);
+        if (!solidAt(x, y) && !solidAt(x + 20, y) && !solidAt(x - 20, y)) { spawnEnemy(4, x, y); break; }
+      }
+    }
+    sfx("boss");
+    g.tip = "棺主出来了"; g.tipT = 3; g.shake = 0.4;
+  }
+}
+
+/* ---------- 玩家移动 ---------- */
+function blockedAt(x, y) {
+  const r = P.r - 1;
+  return solidAt(x - r, y - r) || solidAt(x + r, y - r) || solidAt(x - r, y + r) || solidAt(x + r, y + r);
+}
+
+function moveBy(dx, dy) {
+  if (dx && !blockedAt(P.x + dx, P.y)) P.x += dx;
+  if (dy && !blockedAt(P.x, P.y + dy)) P.y += dy;
+  P.x = clamp(P.x, P.r + 2, WT * TS - P.r - 2);
+  P.y = clamp(P.y, P.r + 2, HT * TS - P.r - 2);
+}
+
+function movePlayer(dt) {
+  let dx = 0, dy = 0;
+  if (keys["ArrowLeft"] || keys["a"] || keys["A"]) dx -= 1;
+  if (keys["ArrowRight"] || keys["d"] || keys["D"]) dx += 1;
+  if (keys["ArrowUp"] || keys["w"] || keys["W"]) dy -= 1;
+  if (keys["ArrowDown"] || keys["s"] || keys["S"]) dy += 1;
+  dx += g.padX; dy += g.padY;
+
+  if (!dx && !dy && touch.active) {
+    const wx = touch.x + g.camx, wy = touch.y + g.camy;
+    const d = Math.hypot(wx - P.x, wy - P.y);
+    if (d > 12) { dx = (wx - P.x) / d; dy = (wy - P.y) / d; }
+  }
+  const len = Math.hypot(dx, dy);
+  if (len > 0.001) {
+    dx /= len; dy /= len;
+    P.ang = Math.atan2(dy, dx);
+    const sp = 104 * g.spdMul * dt;
+    moveBy(dx * sp, dy * sp);
+  }
+}
+
+/* PART3 */
+
+/* ============================================================
+   PART3 —— 武器 / 敌人 / 升级
+   ============================================================ */
+
+function nearestEnemy() {
+  let best = null, bd = 1e9;
+  for (let i = 0; i < enemies.length; i++) {
+    const e = enemies[i];
+    if (!e.alive) continue;
+    const d = dist2(e.x, e.y, P.x, P.y);
+    if (d < bd) { bd = d; best = e; }
+  }
+  return best;
+}
+
+function cdOf(w) {
+  const l = g.wlvl[w];
+  let v = 1;
+  switch (w) {
+    case 0: v = 0.58 - 0.05 * l; break;
+    case 1: v = 0.70 - 0.07 * l; break;
+    case 2: v = 0.22; break;                       // 符纸靠 tick
+    case 3: v = 2.35 - 0.28 * l; break;
+    case 4: v = 1.55 - 0.16 * l; break;
+    case 5: v = 0.92 - 0.10 * l; break;
+    case 6: v = 1.05 - 0.11 * l; break;
+  }
+  v = Math.max(0.18, v);
+  if (g.wevo[w]) v *= 0.82;
+  return v;
+}
+
+function fireWeapon(w) {
+  const l = g.wlvl[w];
+  const evo = g.wevo[w];
+  const tgt = nearestEnemy();
+
+  if (w === 0) {                                   // 剑光 / 月华斩
+    let ang = P.ang;
+    if (tgt) ang = Math.atan2(tgt.y - P.y, tgt.x - P.x);
+    const reach = (58 + 6 * l) * (evo ? 1.5 : 1);
+    const cone = evo ? Math.PI : 0.62;
+    slashes.push({ x: P.x, y: P.y, ang, reach, cone, life: 0.26, max: 0.26, evo });
+    const dmg = 10 + 7 * l;
+    for (const e of enemies) {
+      if (!e.alive) continue;
+      const d = Math.hypot(e.x - P.x, e.y - P.y);
+      if (d > reach + e.r) continue;
+      let da = Math.atan2(e.y - P.y, e.x - P.x) - ang;
+      while (da > Math.PI) da -= TAU;
+      while (da < -Math.PI) da += TAU;
+      if (Math.abs(da) <= cone) damageEnemy(e, dmg);
+    }
+    sfx("swing");
+    addRing(P.x, P.y, reach * 0.6, evo ? "#f0cf7a" : "#e6dcbe", 0.2);
+    return;
+  }
+
+  if (w === 1) {                                   // 铜钱镖 / 万钱阵
+    const n = 1 + Math.floor(l / 2) + (evo ? 4 : 0);
+    const base = tgt ? Math.atan2(tgt.y - P.y, tgt.x - P.x) : P.ang;
+    const dmg = 8 + 5 * l;
+    for (let i = 0; i < n; i++) {
+      const spread = n === 1 ? 0 : (i - (n - 1) / 2) * (evo ? 0.34 : 0.18);
+      const a = base + spread;
+      bullets.push({
+        x: P.x + Math.cos(a) * 12, y: P.y + Math.sin(a) * 12,
+        vx: Math.cos(a) * 430, vy: Math.sin(a) * 430,
+        kind: 0, dmg, pierce: 1 + Math.floor(l / 2) + (evo ? 3 : 0),
+        life: 1.1, evo, r: 4,
+      });
+    }
+    sfx("coin");
+    return;
+  }
+
+  if (w === 3) {                                   // 长明灯 / 灯王长明
+    const r = (80 + 10 * l) * (evo ? 1.35 : 1);
+    addRing(P.x, P.y, r, "#f2a761", 0.42);
+    pulses.push({ x: P.x, y: P.y, r: r, col: "#f2a761", life: 0.42, max: 0.42, kind: "fill" });
+    const dmg = 14 + 6 * l;
+    let hit = 0;
+    for (const e of enemies) {
+      if (!e.alive) continue;
+      if (dist2(e.x, e.y, P.x, P.y) < (r + e.r) * (r + e.r)) { damageEnemy(e, dmg); hit++; }
+    }
+    if (evo && hit) {
+      g.hp = Math.min(g.hp0, g.hp + 2);
+      addFloat(P.x, P.y - 16, "+2", "#8fc46a");
+    }
+    sfx("lamp");
+    return;
+  }
+
+  if (w === 4) {                                   // 铜铃 / 钟鸣不止
+    const r = 62 + 9 * l;
+    const dmg = 4 + 2 * l;
+    const slowMul = evo ? 0.30 : 0.52;
+    addRing(P.x, P.y, r, "#c6d2de", 0.38);
+    for (const e of enemies) {
+      if (!e.alive) continue;
+      if (dist2(e.x, e.y, P.x, P.y) < (r + e.r) * (r + e.r)) {
+        damageEnemy(e, dmg);
+        e.slow = 2.2; e.slowmul = slowMul;
+      }
+    }
+    sfx("bell");
+    return;
+  }
+
+  if (w === 5) {                                   // 纸鹤 / 群鹤归巢
+    const n = evo ? 3 : 1;
+    const dmg = 9 + 4 * l;
+    for (let i = 0; i < n; i++) {
+      const a = (tgt ? Math.atan2(tgt.y - P.y, tgt.x - P.x) : P.ang) + (i - (n - 1) / 2) * 0.5;
+      bullets.push({
+        x: P.x + Math.cos(a) * 10, y: P.y + Math.sin(a) * 10,
+        vx: Math.cos(a) * 250, vy: Math.sin(a) * 250,
+        kind: 2, dmg, pierce: 1, life: 3.2, evo, r: 5,
+        homing: true, turn: 520,
+      });
+    }
+    sfx("crane");
+    return;
+  }
+
+  if (w === 6) {                                   // 墨滴 / 泼墨成山
+    const a = tgt ? Math.atan2(tgt.y - P.y, tgt.x - P.x) : P.ang;
+    bullets.push({
+      x: P.x + Math.cos(a) * 12, y: P.y + Math.sin(a) * 12,
+      vx: Math.cos(a) * 300, vy: Math.sin(a) * 300,
+      kind: 3, dmg: 12 + 6 * l, pierce: 1, life: 1.4, evo,
+      r: 5, splash: 30 + 4 * l,
+    });
+    sfx("ink");
+    return;
+  }
+}
+
+/* ---------- 符纸环绕 ---------- */
+function updateOrbit(dt) {
+  const w = 2;
+  if (!g.wown[w]) return;
+  const l = g.wlvl[w];
+  const evo = g.wevo[w];
+  g.orb += dt * (1.9 + 0.12 * l) * (evo ? 1.35 : 1);
+  const count = 2 + l + (evo ? 3 : 0);
+  const rad = 44 + l * 2;
+  g.talTick -= dt;
+  const tickGap = evo ? 0.13 : 0.22;
+  if (g.talTick <= 0) {
+    g.talTick = tickGap;
+    const dmg = 6 + 3 * l;
+    for (let i = 0; i < count; i++) {
+      const a = g.orb + i * TAU / count;
+      const ox = P.x + Math.cos(a) * rad, oy = P.y + Math.sin(a) * rad;
+      let hit = false;
+      for (const e of enemies) {
+        if (!e.alive) continue;
+        if (dist2(e.x, e.y, ox, oy) < (e.r + 13) * (e.r + 13)) { damageEnemy(e, dmg); hit = true; }
+      }
+      if (hit) addParts(ox, oy, 3, "#c0a2f0", 70, 2);
+    }
+    sfx("talisman");
+  }
+}
+
+/* ---------- 子弹更新 ---------- */
+function updateBullets(dt) {
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    if (b.homing) {
+      let tgt = null, bd = 1e9;
+      for (const e of enemies) {
+        if (!e.alive) continue;
+        const d = dist2(e.x, e.y, b.x, b.y);
+        if (d < bd) { bd = d; tgt = e; }
+      }
+      if (tgt) {
+        const want = Math.atan2(tgt.y - b.y, tgt.x - b.x);
+        let cur = Math.atan2(b.vy, b.vx);
+        let da = want - cur;
+        while (da > Math.PI) da -= TAU;
+        while (da < -Math.PI) da += TAU;
+        const turn = b.turn * dt / 250;
+        cur += clamp(da, -turn, turn);
+        const sp = Math.hypot(b.vx, b.vy);
+        b.vx = Math.cos(cur) * sp; b.vy = Math.sin(cur) * sp;
+      }
+    }
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    b.life -= dt;
+
+    if (solidAt(b.x, b.y)) {
+      if (b.kind === 3) splashInk(b);
+      addParts(b.x, b.y, 4, "#cbbda0", 60, 2);
+      bullets.splice(i, 1);
+      continue;
+    }
+
+    let hitIdx = -1;
+    for (let k = 0; k < enemies.length; k++) {
+      const e = enemies[k];
+      if (!e.alive) continue;
+      const rr = e.r + b.r;
+      if (dist2(e.x, e.y, b.x, b.y) < rr * rr) { hitIdx = k; break; }
+    }
+    if (hitIdx >= 0) {
+      const e = enemies[hitIdx];
+      damageEnemy(e, b.dmg);
+      if (b.kind === 3) splashInk(b);
+      if (b.kind === 2 && b.evo) addParts(b.x, b.y, 8, "#f0e6d0", 90, 2);
+      b.pierce--;
+      if (b.pierce <= 0 || b.kind === 3) {
+        bullets.splice(i, 1);
+        continue;
+      }
+    }
+    if (b.life <= 0) {
+      if (b.kind === 3) splashInk(b);
+      bullets.splice(i, 1);
+    }
+  }
+}
+
+function splashInk(b) {
+  const r = b.splash;
+  addRing(b.x, b.y, r, "#7a90b0", 0.3);
+  pulses.push({ x: b.x, y: b.y, r, col: "#3b4a5e", life: 0.3, max: 0.3, kind: "fill" });
+  for (const e of enemies) {
+    if (!e.alive) continue;
+    if (dist2(e.x, e.y, b.x, b.y) < (r + e.r) * (r + e.r)) damageEnemy(e, b.dmg * 0.7);
+  }
+  addParts(b.x, b.y, 10, "#4a5a70", 110, 3);
+}
+
+/* ---------- 敌人更新 ---------- */
+function updateEnemies(dt) {
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    if (!e.alive) { enemies.splice(i, 1); continue; }
+    if (e.slow > 0) { e.slow -= dt; if (e.slow <= 0) e.slowmul = 1; }
+    const sp = e.spd * (e.slow > 0 ? e.slowmul : 1);
+    const dx = P.x - e.x, dy = P.y - e.y;
+    const d = Math.hypot(dx, dy) || 1;
+    let vx = dx / d * sp, vy = dy / d * sp;
+    // 轻微分离，避免叠成一坨
+    for (let k = 0; k < enemies.length; k += 6) {
+      const o = enemies[k];
+      if (o === e || !o.alive) continue;
+      const sx = e.x - o.x, sy = e.y - o.y;
+      const sd = Math.hypot(sx, sy);
+      if (sd > 0.1 && sd < e.r + o.r) { vx += sx / sd * 40; vy += sy / sd * 40; }
+    }
+    const nx = e.x + vx * dt, ny = e.y + vy * dt;
+    if (!solidAt(nx, e.y)) e.x = nx;
+    if (!solidAt(e.x, ny)) e.y = ny;
+    e.wob += dt * 3;
+
+    // 撞到玩家
+    if (g.iframe <= 0 && dist2(e.x, e.y, P.x, P.y) < (e.r + P.r) * (e.r + P.r)) {
+      g.hp -= e.dmg;
+      g.iframe = 0.55;
+      g.shake = 0.5;
+      g.flash = 0.35;
+      addFloat(P.x, P.y - 18, "-" + e.dmg, "#e05a4a");
+      addParts(P.x, P.y, 12, "#c0392b", 130, 3);
+      sfx("hurt");
+      if (g.hp <= 0) { g.hp = 0; g.state = "dead"; sfx("die"); return; }
+    }
+  }
+}
+
+/* ---------- 拾取 / 升级 ---------- */
+function updatePickups(dt) {
+  for (let i = pickups.length - 1; i >= 0; i--) {
+    const p = pickups[i];
+    p.life -= dt;
+    if (p.life <= 0) { pickups.splice(i, 1); continue; }
+    const d = Math.hypot(P.x - p.x, P.y - p.y);
+    if (d < g.magnet) {
+      const sp = 260 * (1 - d / g.magnet) + 60;
+      p.x += (P.x - p.x) / d * sp * dt;
+      p.y += (P.y - p.y) / d * sp * dt;
+    }
+    if (d < P.r + 8) {
+      g.xp += p.xp;
+      sfx("pick");
+      addParts(p.x, p.y, 4, "#6fbfcf", 80, 2);
+      pickups.splice(i, 1);
+      checkLevel();
+    }
+  }
+}
+
+function checkLevel() {
+  while (g.xp >= g.xpneed) {
+    g.xp -= g.xpneed;
+    g.level++;
+    g.xpneed = 3 + g.level * 2;
+    g.hp = Math.min(g.hp0, g.hp + 4);
+    buildCards();
+    g.state = "level";
+    g.chs = 0;
+    sfx("level");
+    break;
+  }
+}
+
+function buildCards() {
+  const pool = [];
+  // 进化优先
+  for (let w = 0; w < 7; w++) if (g.wown[w] && g.wlvl[w] >= 5 && !g.wevo[w]) pool.push({ k: "evo", w, weight: 3 });
+  for (let w = 0; w < 7; w++) if (!g.wown[w]) pool.push({ k: "new", w, weight: 2 });
+  for (let w = 0; w < 7; w++) if (g.wown[w] && g.wlvl[w] < 5) pool.push({ k: "up", w, weight: 2 });
+  for (let s = 0; s < 4; s++) pool.push({ k: "attr", s, weight: 1 });
+
+  const picked = [];
+  // 先进化
+  const evoItem = pool.find(o => o.k === "evo");
+  if (evoItem && picked.length < 1) picked.push(evoItem);
+
+  const weighted = [];
+  for (const o of pool) {
+    if (o.k === "evo") continue;
+    for (let i = 0; i < o.weight; i++) weighted.push(o);
+  }
+  let guard = 0;
+  while (picked.length < 3 && guard++ < 400) {
+    const o = weighted[Math.floor(Math.random() * weighted.length)];
+    if (!o) break;
+    if (picked.some(q => q.k === o.k && (q.w === o.w && q.s === o.s))) continue;
+    picked.push(o);
+  }
+  while (picked.length < 3) picked.push({ k: "attr", s: 0 });
+
+  g.card = picked.slice(0, 3).map(o => {
+    if (o.k === "new") return { code: CH_NEW(o.w), kind: "new", w: o.w };
+    if (o.k === "up") return { code: CH_UP(o.w), kind: "up", w: o.w };
+    if (o.k === "evo") return { code: CH_EVO(o.w), kind: "evo", w: o.w };
+    return { code: CH_ATTR(o.s), kind: "attr", s: o.s };
+  });
+  g.choice = g.card.map(c => c.code);
+  // 进化卡放中间高亮
+  const evoIdx = g.card.findIndex(c => c.kind === "evo");
+  if (evoIdx > 0) {
+    const tmp = g.card[0]; g.card[0] = g.card[evoIdx]; g.card[evoIdx] = tmp;
+    g.choice = g.card.map(c => c.code);
+  }
+  g.chs = 0;
+}
+
+function pickCard() {
+  const c = g.card[g.chs];
+  if (!c) { g.state = "play"; return; }
+  if (c.kind === "new") {
+    g.wown[c.w] = true; g.wlvl[c.w] = 1;
+    g.tip = "得了 " + WNAME[c.w]; g.tipT = 2.4;
+  } else if (c.kind === "up") {
+    g.wlvl[c.w] = Math.min(5, g.wlvl[c.w] + 1);
+    g.tip = WNAME[c.w] + " 到第 " + g.wlvl[c.w] + " 阶"; g.tipT = 2.4;
+  } else if (c.kind === "evo") {
+    g.wevo[c.w] = true;
+    g.evoFlash = 1; g.flash = 0.5; g.shake = 0.3;
+    addRing(P.x, P.y, 120, "#f0cf7a", 0.6);
+    addParts(P.x, P.y, 26, "#f0cf7a", 180, 3);
+    g.tip = "进化 · " + WEVONAME[c.w]; g.tipT = 3.2;
+    sfx("evo");
+  } else {
+    if (c.s === 0) g.dmgMul += 0.2;
+    if (c.s === 1) g.spdMul += 0.12;
+    if (c.s === 2) { g.hp0 += 30; g.hp += 30; }
+    if (c.s === 3) g.magnet += 40;
+    g.tip = ATTRS[c.s].n + " · " + ATTRS[c.s].d; g.tipT = 2.4;
+    sfx("ui");
+  }
+  g.xp = Math.max(0, g.xp);
+  g.state = "play";
+  checkLevel();
+}
+
+/* ---------- 总更新 ---------- */
+function update(dt) {
+  g.anim += dt;
+  if (g.tipT > 0) g.tipT -= dt;
+  if (g.shake > 0) g.shake = Math.max(0, g.shake - dt * 2);
+  if (g.flash > 0) g.flash = Math.max(0, g.flash - dt * 2.4);
+  if (g.iframe > 0) g.iframe = Math.max(0, g.iframe - dt);
+  if (g.evoFlash > 0) g.evoFlash = Math.max(0, g.evoFlash - dt);
+
+  if (g.state !== "play") { updateEffects(dt); return; }
+
+  g.t += dt;
+  movePlayer(dt);
+  spawnTick(dt);
+
+  for (let w = 0; w < 7; w++) {
+    if (!g.wown[w]) continue;
+    if (w === 2) continue;
+    g.wcd[w] -= dt;
+    if (g.wcd[w] <= 0) { fireWeapon(w); g.wcd[w] = cdOf(w); }
+  }
+  updateOrbit(dt);
+  updateBullets(dt);
+  updateEnemies(dt);
+  updatePickups(dt);
+  updateEffects(dt);
+
+  // 镜头：跟随 + 朝向前瞻
+  const tx = clamp(P.x - W / 2 + (P.dirX || 0) * 30, 0, WT * TS - W);
+  const ty = clamp(P.y - H / 2 + (P.dirY || 0) * 24, 0, HT * TS - H);
+  g.camx = lerp(g.camx, tx, Math.min(1, dt * 9));
+  g.camy = lerp(g.camy, ty, Math.min(1, dt * 9));
+  const s = g.shake * 6;
+  g.shx = rnd(-s, s); g.shy = rnd(-s, s);
+}
+
+function updateEffects(dt) {
+  for (let i = slashes.length - 1; i >= 0; i--) { slashes[i].life -= dt; if (slashes[i].life <= 0) slashes.splice(i, 1); }
+  for (let i = pulses.length - 1; i >= 0; i--) { pulses[i].life -= dt; if (pulses[i].life <= 0) pulses.splice(i, 1); }
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vx *= 0.94; p.vy *= 0.94;
+    if (p.life <= 0) parts.splice(i, 1);
+  }
+  for (let i = floats.length - 1; i >= 0; i--) {
+    const f = floats[i];
+    f.life -= dt; f.y -= dt * 26;
+    if (f.life <= 0) floats.splice(i, 1);
+  }
+  for (let i = bullets.length - 1; i >= 0; i--) if (bullets[i].life <= 0) bullets.splice(i, 1);
+}
+
+/* PART4 */
+
+/* ============================================================
+   PART4 —— 渲染（exe 画风版）
+   ------------------------------------------------------------
+   一套和 Windows 版《夜行圆球》同源的美术：640×480 全分辨率直绘，
+   不用像素放大；球体是「暗描边 + 亮高光 + 投影」，地面是石板，
+   墙是砖块，画面收一圈暗角，主角脚下一盏灯。
+   ============================================================ */
+
+function makeCanvas(w, h) {
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  return c;
+}
+
+/* ---------- 素材烘焙 ---------- */
+const floorTex = [], wallTex = [];
+(function bake() {
+  const BASES = ["#2b271e", "#292519", "#2d2920", "#28241a"];
+  const P = 1;
+
+  for (let v = 0; v < 4; v++) {
+    const c = makeCanvas(TS, TS), x = c.getContext("2d");
+    const base = BASES[v];
+    x.fillStyle = base;
+    x.fillRect(0, 0, TS, TS);
+
+    // 石板缝：上、左各一道暗缝，右下压一点亮边
+    x.fillStyle = "rgba(10,8,6,0.34)";
+    x.fillRect(0, 0, TS, 2);
+    x.fillRect(0, 0, 2, TS);
+    x.fillStyle = "rgba(255,236,196,0.055)";
+    x.fillRect(2, TS - 2, TS - 2, 1);
+    x.fillRect(TS - 2, 2, 1, TS - 2);
+
+    // 石面斑驳：几块大一点的浅 / 深色
+    x.fillStyle = "rgba(255,240,205,0.032)";
+    x.fillRect(3, 4, 12, 9);
+    x.fillStyle = "rgba(0,0,0,0.06)";
+    x.fillRect(17, 18, 11, 8);
+
+    // 石粒：小点，位置随机但不成网格
+    let sd = (v + 11) * 7919;
+    const rr = () => { sd = (sd * 1103515245 + 12345) & 0x7fffffff; return sd / 0x7fffffff; };
+    for (let i = 0; i < 26; i++) {
+      const bx = 2 + Math.floor(rr() * (TS - 5));
+      const by = 2 + Math.floor(rr() * (TS - 5));
+      const r = rr();
+      x.fillStyle = r < 0.55 ? "rgba(0,0,0,0.22)" : "rgba(255,235,195,0.07)";
+      x.fillRect(bx, by, r < 0.2 ? 3 : 2, 2);
+    }
+    // 一道裂纹
+    if (v === 2) {
+      x.strokeStyle = "rgba(0,0,0,0.32)";
+      x.lineWidth = 1;
+      x.beginPath();
+      x.moveTo(9, 27); x.lineTo(13, 22); x.lineTo(12, 17); x.lineTo(18, 12); x.lineTo(17, 6);
+      x.stroke();
+    }
+    if (v === 3) {
+      // 磨亮的石面
+      x.fillStyle = "rgba(255,240,205,0.05)";
+      x.fillRect(4, 5, 14, 9);
+    }
+    floorTex.push(c);
+  }
+
+  // 砖墙：横砖 16×8，错缝
+  for (let v = 0; v < 3; v++) {
+    const c = makeCanvas(TS, TS), x = c.getContext("2d");
+    x.fillStyle = "#221c13";            // 灰浆底
+    x.fillRect(0, 0, TS, TS);
+    const bh = 8, bw = 16;
+    for (let row = 0; row < 4; row++) {
+      const off = row % 2 ? 8 : 0;
+      for (let col = -1; col < 3; col++) {
+        const bx = col * bw + off + 1, by = row * bh + 1;
+        const shadeK = (row + col + v) % 3;
+        x.fillStyle = shadeK === 0 ? "#463d2c" : shadeK === 1 ? "#403828" : "#4b4231";
+        x.fillRect(bx, by, bw - 2, bh - 2);
+        // 砖面上亮 / 下暗
+        x.fillStyle = "rgba(255,238,198,0.10)";
+        x.fillRect(bx, by, bw - 2, 1);
+        x.fillStyle = "rgba(0,0,0,0.38)";
+        x.fillRect(bx, by + bh - 3, bw - 2, 2);
+        x.fillStyle = "rgba(0,0,0,0.20)";
+        x.fillRect(bx + bw - 3, by, 2, bh - 2);
+        // 偶尔一块裂了
+        if (((row * 3 + col + v) % 7) === 0) {
+          x.strokeStyle = "rgba(0,0,0,0.30)";
+          x.lineWidth = 1;
+          x.beginPath();
+          x.moveTo(bx + 3, by + 5); x.lineTo(bx + 7, by + 3); x.lineTo(bx + 10, by + 5);
+          x.stroke();
+        }
+      }
+    }
+    wallTex.push(c);
+  }
+})();
+
+const vinTex = (function () {
+  const c = makeCanvas(W, H), x = c.getContext("2d");
+  const grd = x.createRadialGradient(W / 2, H / 2, H * 0.34, W / 2, H / 2, H * 0.95);
+  grd.addColorStop(0, "rgba(0,0,0,0)");
+  grd.addColorStop(0.62, "rgba(0,0,0,0.16)");
+  grd.addColorStop(1, "rgba(0,0,0,0.55)");
+  x.fillStyle = grd; x.fillRect(0, 0, W, H);
+  return c;
+})();
+
+/* ---------- 圆球（暗描边 + 高光 + 投影） ---------- */
+function ball(x, y, r, col, rim, highlight) {
+  ctx.save();
+  // 投影
+  ctx.fillStyle = "rgba(0,0,0,0.38)";
+  ctx.beginPath(); ctx.ellipse(x + 1.5, y + r * 0.86, r * 0.92, r * 0.36, 0, 0, TAU); ctx.fill();
+  // 描边
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(9,8,6,0.95)";
+  ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.stroke();
+  // 底
+  ctx.fillStyle = rim;
+  ctx.beginPath(); ctx.arc(x, y, r - 0.6, 0, TAU); ctx.fill();
+  // 面
+  ctx.fillStyle = col;
+  ctx.beginPath(); ctx.arc(x, y - r * 0.07, Math.max(1, r - 1.6), 0, TAU); ctx.fill();
+  // 高光
+  if (highlight !== false) {
+    ctx.fillStyle = "rgba(255,255,255,0.26)";
+    ctx.beginPath(); ctx.ellipse(x - r * 0.34, y - r * 0.44, r * 0.30, r * 0.20, -0.55, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function eyes(x, y, r, followX, followY, dark) {
+  const ex = r * 0.34, ey = r * 0.08;
+  const pdx = clamp(followX, -1, 1) * r * 0.12, pdy = clamp(followY, -1, 1) * r * 0.12;
+  for (let i = 0; i < 2; i++) {
+    const cx = x + (i ? ex : -ex);
+    ctx.fillStyle = dark ? "#2b2620" : "#f4ead3";
+    ctx.beginPath(); ctx.ellipse(cx, y - ey, Math.max(1.2, r * 0.21), Math.max(1.4, r * 0.24), 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = dark ? "#f4ead3" : "#1f1b14";
+    ctx.beginPath(); ctx.arc(cx + pdx, y - ey + pdy, Math.max(0.9, r * 0.105), 0, TAU); ctx.fill();
+  }
+}
+
+/* ---------- 主绘制 ---------- */
+function draw() {
+  const camx = g.camx + g.shx;
+  const camy = g.camy + g.shy;
+
+  if (g.state === "title") {
+    ctx.fillStyle = "#0a0906";
+    ctx.fillRect(0, 0, W, H);
+    for (let i = 0; i < 26; i++) {
+      const sd = h2(i, 7, 91);
+      const x = (sd % 600) + 20;
+      const y = ((sd >> 9) % 480 + g.anim * (6 + (sd >> 3) % 10)) % 480;
+      const a = 0.10 + ((sd >> 17) % 10) / 60;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = "#e4d08a";
+      ctx.beginPath(); ctx.arc(x, y, 1.4, 0, TAU); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.drawImage(vinTex, 0, 0);
+    drawOverlay();
+    return;
+  }
+
+  /* 底：夜色 */
+  ctx.fillStyle = "#0a0906";
+  ctx.fillRect(0, 0, W, H);
+
+  /* ---------- 地图 ---------- */
+  const tx0 = Math.max(0, Math.floor(camx / TS) - 1), ty0 = Math.max(0, Math.floor(camy / TS) - 1);
+  const tx1 = Math.min(WT, Math.ceil((camx + W) / TS) + 1), ty1 = Math.min(HT, Math.ceil((camy + H) / TS) + 1);
+  for (let ty = ty0; ty < ty1; ty++) {
+    for (let tx = tx0; tx < tx1; tx++) {
+      const sx = Math.round(tx * TS - camx), sy = Math.round(ty * TS - camy);
+      const isWall = tileAt(tx, ty) !== 0;
+      const deepWall = isWall && tileAt(tx - 1, ty) !== 0 && tileAt(tx + 1, ty) !== 0 &&
+                       tileAt(tx, ty - 1) !== 0 && tileAt(tx, ty + 1) !== 0;
+      if (deepWall) {
+        ctx.fillStyle = "#0b0906";
+        ctx.fillRect(sx, sy, TS, TS);
+        const spot = h2(tx, ty, 13);
+        if ((spot & 0xff) < 30) {
+          ctx.fillStyle = "rgba(150,130,96,0.10)";
+          ctx.fillRect(sx + ((spot >> 8) % 24), sy + ((spot >> 15) % 22), 3, 2);
+        }
+        continue;
+      }
+      if (isWall) {
+        ctx.drawImage(wallTex[h2(tx, ty, 41) % 3], sx, sy);
+        // 整块砖墙的明暗起伏
+        const tone = h2(tx, ty, 77) % 5;
+        if (tone === 0) { ctx.fillStyle = "rgba(0,0,0,0.14)"; ctx.fillRect(sx, sy, TS, TS); }
+        else if (tone === 1) { ctx.fillStyle = "rgba(255,236,196,0.055)"; ctx.fillRect(sx, sy, TS, TS); }
+        // 顶部受光的亮边（上面是空地时）
+        if (ty > 0 && !tileAt(tx, ty - 1)) {
+          ctx.fillStyle = "rgba(240,220,176,0.16)";
+          ctx.fillRect(sx, sy, TS, 3);
+          ctx.fillStyle = "rgba(240,220,176,0.06)";
+          ctx.fillRect(sx, sy + 3, TS, 2);
+        }
+        // 砖墙外侧的暗边
+        ctx.fillStyle = "rgba(0,0,0,0.30)";
+        ctx.fillRect(sx, sy + TS - 2, TS, 2);
+        if (ty + 1 < HT && !tileAt(tx, ty + 1)) {
+          ctx.fillStyle = "rgba(0,0,0,0.34)";
+          ctx.fillRect(sx, sy + TS, TS, 4);
+          ctx.fillStyle = "rgba(0,0,0,0.18)";
+          ctx.fillRect(sx, sy + TS + 4, TS, 4);
+        }
+      } else {
+        ctx.drawImage(floorTex[h2(tx, ty, 5) % 4], sx, sy);
+        // 每块石板的明暗略有差别（exe 的地面就是一格一格深浅不一）
+        const ftone = h2(tx, ty, 29) % 7;
+        if (ftone === 0) { ctx.fillStyle = "rgba(0,0,0,0.13)"; ctx.fillRect(sx, sy, TS, TS); }
+        else if (ftone === 1) { ctx.fillStyle = "rgba(255,240,205,0.035)"; ctx.fillRect(sx, sy, TS, TS); }
+        // 零散物件：碎砖 / 骨头 / 铜钱
+        const hv2 = h2(tx, ty, 61);
+        if ((hv2 & 0xff) < 30) {
+          const dx = sx + 5 + ((hv2 >> 8) % 22), dy = sy + 6 + ((hv2 >> 14) % 20);
+          ctx.fillStyle = "rgba(0,0,0,0.4)";
+          ctx.beginPath(); ctx.ellipse(dx + 2, dy + 3, 4, 1.6, 0, 0, TAU); ctx.fill();
+          ctx.fillStyle = "rgba(180,168,138,0.40)";
+          ctx.fillRect(dx, dy, 3, 2);
+        }
+        // 墙脚暗影
+        if (tx > 0 && tileAt(tx - 1, ty)) {
+          const gg = ctx.createLinearGradient(sx, 0, sx + 10, 0);
+          gg.addColorStop(0, "rgba(0,0,0,0.30)"); gg.addColorStop(1, "rgba(0,0,0,0)");
+          ctx.fillStyle = gg; ctx.fillRect(sx, sy, 10, TS);
+        }
+        if (ty > 0 && tileAt(tx, ty - 1)) {
+          const gg = ctx.createLinearGradient(0, sy, 0, sy + TS);
+          gg.addColorStop(0, "rgba(0,0,0,0.26)"); gg.addColorStop(1, "rgba(0,0,0,0)");
+          ctx.fillStyle = gg; ctx.fillRect(sx, sy, TS, TS);
+        }
+      }
+    }
+  }
+
+  /* ---------- 主角脚下那盏灯 ---------- */
+  {
+    const lx = P.x - camx, ly = P.y - camy;
+    const gl = ctx.createRadialGradient(lx, ly, 6, lx, ly, 132);
+    gl.addColorStop(0, "rgba(126,214,224,0.16)");
+    gl.addColorStop(0.45, "rgba(74,169,182,0.07)");
+    gl.addColorStop(1, "rgba(74,169,182,0)");
+    ctx.fillStyle = gl;
+    ctx.beginPath(); ctx.arc(lx, ly, 132, 0, TAU); ctx.fill();
+  }
+
+  /* ---------- 光点 ---------- */
+  for (const p of pickups) {
+    const sx = p.x - camx, sy = p.y - camy;
+    if (sx < -20 || sy < -20 || sx > W + 20 || sy > H + 20) continue;
+    const blink = ((p.life * 6) | 0) % 5 === 0;
+    if (blink) continue;
+    const gl = ctx.createRadialGradient(sx, sy, 2, sx, sy, 13);
+    gl.addColorStop(0, "rgba(120,220,236,0.35)");
+    gl.addColorStop(1, "rgba(111,191,207,0)");
+    ctx.fillStyle = gl;
+    ctx.beginPath(); ctx.arc(sx, sy, 13, 0, TAU); ctx.fill();
+    ctx.strokeStyle = "rgba(111,191,207,0.55)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(sx, sy, 6.5, 0, TAU); ctx.stroke();
+    ctx.fillStyle = "#63c6d8";
+    ctx.beginPath(); ctx.arc(sx, sy, 3.4, 0, TAU); ctx.fill();
+    ctx.fillStyle = "#e6fbff";
+    ctx.beginPath(); ctx.arc(sx - 1, sy - 1.2, 1.3, 0, TAU); ctx.fill();
+  }
+
+  /* ---------- 子弹 ---------- */
+  for (const b of bullets) {
+    const sx = b.x - camx, sy = b.y - camy;
+    if (sx < -24 || sy < -24 || sx > W + 24 || sy > H + 24) continue;
+    if (b.kind === 0) {
+      const gl = ctx.createRadialGradient(sx, sy, 1, sx, sy, 12);
+      gl.addColorStop(0, "rgba(240,207,122,0.28)");
+      gl.addColorStop(1, "rgba(240,207,122,0)");
+      ctx.fillStyle = gl;
+      ctx.beginPath(); ctx.arc(sx, sy, 12, 0, TAU); ctx.fill();
+      ball(sx, sy, 5, b.evo ? "#f0cf7a" : "#e2b862", b.evo ? "#8a6a24" : "#785820", false);
+      ctx.fillStyle = "rgba(20,16,8,0.7)";
+      ctx.fillRect(sx - 1.4, sy - 1.4, 2.8, 2.8);
+    } else if (b.kind === 2) {
+      ctx.save();
+      ctx.translate(sx, sy); ctx.rotate(Math.atan2(b.vy, b.vx));
+      ctx.fillStyle = b.evo ? "#f0cf7a" : "#f2e8d2";
+      ctx.beginPath(); ctx.moveTo(8, 0); ctx.lineTo(-5, -6); ctx.lineTo(-2, 0); ctx.lineTo(-5, 6); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "rgba(0,0,0,0.5)";
+      ctx.beginPath(); ctx.moveTo(8, 0); ctx.lineTo(-1, -1.6); ctx.lineTo(-1, 1.6); ctx.closePath(); ctx.fill();
+      ctx.restore();
+    } else {
+      const gl = ctx.createRadialGradient(sx, sy, 1, sx, sy, 12);
+      gl.addColorStop(0, "rgba(90,120,160,0.30)");
+      gl.addColorStop(1, "rgba(70,95,130,0)");
+      ctx.fillStyle = gl;
+      ctx.beginPath(); ctx.arc(sx, sy, 12, 0, TAU); ctx.fill();
+      ball(sx, sy, 5, "#2b3a4c", "#16202a", false);
+      ctx.fillStyle = "rgba(160,190,220,0.7)";
+      ctx.beginPath(); ctx.arc(sx - 1.6, sy - 2, 1.4, 0, TAU); ctx.fill();
+    }
+  }
+
+  /* ---------- 敌人 ---------- */
+  for (const e of enemies) {
+    const sx = e.x - camx, sy = e.y - camy;
+    if (sx < -40 || sy < -40 || sx > W + 40 || sy > H + 40) continue;
+    const bob = Math.sin(e.wob) * 1.6;
+    ctx.save();
+    if (e.slow > 0) {
+      ctx.strokeStyle = "rgba(198,210,222,0.55)"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(sx, sy + bob, e.r + 4, 0, TAU); ctx.stroke();
+    }
+    ball(sx, sy + bob, e.r, e.col, shade(e.col, -0.35), false);
+    eyes(sx, sy + bob, e.r, (P.x - e.x) / 40, (P.y - e.y) / 40, true);
+    if (e.type === 2) {
+      ctx.fillStyle = shade(e.col, 0.22);
+      ctx.beginPath();
+      ctx.moveTo(sx - 5, sy + bob - e.r + 2);
+      ctx.lineTo(sx, sy + bob - e.r - 7);
+      ctx.lineTo(sx + 5, sy + bob - e.r + 2);
+      ctx.closePath(); ctx.fill();
+    }
+    if (e.type === 4) {
+      const gl = ctx.createRadialGradient(sx, sy, e.r * 0.5, sx, sy, e.r * 2.2);
+      gl.addColorStop(0, "rgba(160,90,208,0.32)"); gl.addColorStop(1, "rgba(160,90,208,0)");
+      ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(sx, sy, e.r * 2.2, 0, TAU); ctx.fill();
+      const w = 60;
+      ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(sx - w / 2, sy - e.r - 13, w, 4);
+      ctx.fillStyle = "#a05ad0"; ctx.fillRect(sx - w / 2, sy - e.r - 13, w * Math.max(0, e.hp / e.hp0), 4);
+    }
+    ctx.restore();
+  }
+
+  /* ---------- 符纸环绕 ---------- */
+  if (g.wown[2]) {
+    const l = g.wlvl[2], evo = g.wevo[2];
+    const count = 2 + l + (evo ? 3 : 0), rad = 44 + l * 2;
+    for (let i = 0; i < count; i++) {
+      const a = g.orb + i * TAU / count;
+      const sx = P.x + Math.cos(a) * rad - camx, sy = P.y + Math.sin(a) * rad - camy;
+      ctx.save(); ctx.translate(sx, sy); ctx.rotate(a * 2);
+      const gl = ctx.createRadialGradient(0, 0, 1, 0, 0, 11);
+      gl.addColorStop(0, "rgba(190,160,255,0.40)"); gl.addColorStop(1, "rgba(190,160,255,0)");
+      ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(0, 0, 11, 0, TAU); ctx.fill();
+      ctx.fillStyle = evo ? "#f0cf7a" : "#e8d58a";
+      ctx.fillRect(-3.5, -6, 7, 12);
+      ctx.strokeStyle = "rgba(120,90,60,0.75)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(-2.4, -3.6); ctx.lineTo(2.4, -3.6); ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  /* ---------- 刀光 ---------- */
+  for (const s of slashes) {
+    const p = 1 - s.life / s.max;
+    const a = 1 - p;
+    ctx.save();
+    ctx.translate(s.x - camx, s.y - camy);
+    const r0 = s.reach * (0.45 + p * 0.55);
+    // 外层柔光
+    ctx.globalAlpha = 0.35 * a;
+    ctx.strokeStyle = s.evo ? "#f0cf7a" : "#f4ead3";
+    ctx.lineWidth = s.evo ? 12 : 9;
+    ctx.beginPath(); ctx.arc(0, 0, r0, s.ang - s.cone, s.ang + s.cone); ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = s.evo ? `rgba(240,207,122,${0.9 * a})` : `rgba(238,228,200,${0.85 * a})`;
+    ctx.lineWidth = s.evo ? 6 : 4.5;
+    ctx.beginPath(); ctx.arc(0, 0, r0, s.ang - s.cone, s.ang + s.cone); ctx.stroke();
+    ctx.strokeStyle = `rgba(255,252,240,${0.65 * a})`;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.arc(0, 0, r0 - 3.5, s.ang - s.cone * 0.9, s.ang + s.cone * 0.9); ctx.stroke();
+    ctx.restore();
+  }
+
+  /* ---------- 脉冲 ---------- */
+  for (const p of pulses) {
+    const k = 1 - p.life / p.max;
+    const sx = p.x - camx, sy = p.y - camy;
+    if (p.kind === "fill") {
+      ctx.save();
+      ctx.globalAlpha = 0.20 * (1 - k);
+      ctx.fillStyle = p.col;
+      ctx.beginPath(); ctx.arc(sx, sy, p.r * (0.5 + k * 0.6), 0, TAU); ctx.fill();
+      ctx.restore();
+    } else {
+      ctx.save();
+      const rr2 = p.r * (0.35 + k * 0.75);
+      ctx.globalAlpha = 0.30 * (1 - k);
+      ctx.strokeStyle = p.col; ctx.lineWidth = 8;
+      ctx.beginPath(); ctx.arc(sx, sy, rr2, 0, TAU); ctx.stroke();
+      ctx.globalAlpha = 0.75 * (1 - k);
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(sx, sy, rr2, 0, TAU); ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  /* ---------- 主角 ---------- */
+  {
+    const sx = P.x - camx, sy = P.y - camy;
+    if (Math.hypot(P.dirX, P.dirY) > 0.01) {
+      ctx.save();
+      for (let i = 3; i >= 1; i--) {
+        ctx.globalAlpha = 0.10 + i * 0.03;
+        ctx.fillStyle = "#4aa9b6";
+        ctx.beginPath(); ctx.arc(sx - P.dirX * i * 5, sy - P.dirY * i * 5, Math.max(2, P.r - i * 1.4), 0, TAU); ctx.fill();
+      }
+      ctx.restore();
+    }
+    if (g.iframe > 0) {
+      const gl = ctx.createRadialGradient(sx, sy, P.r, sx, sy, P.r + 14);
+      gl.addColorStop(0, "rgba(255,240,200,0.65)"); gl.addColorStop(1, "rgba(255,240,200,0)");
+      ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(sx, sy, P.r + 14, 0, TAU); ctx.fill();
+      ctx.globalAlpha = (Math.floor(g.anim * 20) % 2) ? 0.55 : 1;
+    }
+    ball(sx, sy, P.r, "#4aa9b6", "#2c7a86", true);
+    eyes(sx, sy, P.r, P.dirX, P.dirY, false);
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------- 粒子 ---------- */
+  for (const p of parts) {
+    const a = p.life / p.max;
+    ctx.globalAlpha = Math.max(0, a);
+    ctx.fillStyle = p.col;
+    ctx.beginPath();
+    ctx.arc(p.x - camx, p.y - camy, Math.max(0.8, p.size / 2), 0, TAU);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  /* ---------- 伤害数字 ---------- */
+  for (const f of floats) {
+    const a = Math.min(1, f.life / 0.35);
+    ctx.globalAlpha = a * 0.95;
+    ctx.font = (f.big ? "bold 17px" : "bold 14px") + ' "Microsoft YaHei", sans-serif';
+    ctx.textAlign = "center";
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "rgba(8,7,5,0.85)";
+    ctx.strokeText(f.txt, f.x - camx, f.y - camy);
+    ctx.fillStyle = f.col;
+    ctx.fillText(f.txt, f.x - camx, f.y - camy);
+  }
+  ctx.globalAlpha = 1;
+
+  /* ---------- 暗角 / 闪白 ---------- */
+  ctx.drawImage(vinTex, 0, 0);
+  if (g.flash > 0) {
+    ctx.fillStyle = "rgba(244,234,211," + Math.min(0.30, g.flash * 0.4) + ")";
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  drawHUD();
+  drawOverlay();
+}
+
+function shade(hex, k) {
+  let r = parseInt(hex.slice(1, 3), 16), gg = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+  const f = (v) => clamp(Math.round(v * (1 + k)), 0, 255);
+  r = f(r); gg = f(gg); b = f(b);
+  return "rgb(" + r + "," + gg + "," + b + ")";
+}
+
+/* ============================================================
+   PART5 —— HUD / 各屏 / 主循环
+   ============================================================ */
+
+function txt(s, x, y, size, col, align, bold) {
+  ctx.font = (bold ? "bold " : "") + size + 'px "Microsoft YaHei", "PingFang SC", sans-serif';
+  ctx.textAlign = align || "center";
+  ctx.textBaseline = "alphabetic";
+  ctx.lineWidth = Math.max(2, size / 6);
+  ctx.strokeStyle = "rgba(6,5,4,0.8)";
+  ctx.strokeText(s, x, y);
+  ctx.fillStyle = col;
+  ctx.fillText(s, x, y);
+}
+
+function drawWeaponIcon(cx, cy, r, w, evo) {
+  const col = evo ? "#f0cf7a" : WCOLS[w];
+  ctx.save();
+  ctx.translate(cx, cy);
+  if (w === 0) {
+    ctx.save();
+    ctx.rotate(-0.55);
+    ctx.strokeStyle = col; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(-r * 0.55, r * 0.9); ctx.lineTo(r * 0.55, -r * 0.9); ctx.stroke();
+    ctx.strokeStyle = "rgba(255,255,255,0.55)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(-r * 0.75, r * 0.75); ctx.lineTo(-r * 0.15, r * 0.15); ctx.stroke();
+    ctx.restore();
+  } else if (w === 1) {
+    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.fill();
+    ctx.fillStyle = "#1a1710"; ctx.fillRect(-2, -2, 4, 4);
+  } else if (w === 2) {
+    ctx.fillStyle = col; ctx.fillRect(-3, -r, 6, r * 2);
+  } else if (w === 3) {
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.moveTo(0, -r); ctx.lineTo(r * 0.7, r * 0.5); ctx.lineTo(-r * 0.7, r * 0.5); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#fff2c8"; ctx.beginPath(); ctx.arc(0, 0, r * 0.35, 0, TAU); ctx.fill();
+  } else if (w === 4) {
+    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(0, 1, r * 0.8, 0.2, Math.PI - 0.2); ctx.fill();
+    ctx.fillRect(-1.5, -r, 3, r);
+  } else if (w === 5) {
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.moveTo(r, 0); ctx.lineTo(-r * 0.6, -r * 0.7); ctx.lineTo(-r * 0.1, 0); ctx.lineTo(-r * 0.6, r * 0.7); ctx.closePath(); ctx.fill();
+  } else {
+    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(0, 1, r * 0.75, 0, TAU); ctx.fill();
+    ctx.fillStyle = "#fff"; ctx.globalAlpha = 0.5;
+    ctx.beginPath(); ctx.arc(-r * 0.3, -r * 0.2, r * 0.25, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+  if (evo) {
+    ctx.fillStyle = "#f0cf7a";
+    ctx.beginPath();
+    const sx = cx + r + 1, sy = cy - r - 1;
+    ctx.moveTo(sx, sy - 3); ctx.lineTo(sx + 3, sy); ctx.lineTo(sx, sy + 3); ctx.lineTo(sx - 3, sy);
+    ctx.closePath(); ctx.fill();
+  }
+}
+
+function drawHUD() {
+  if (g.state === "title") return;
+  // 血条
+  ctx.fillStyle = "rgba(10,9,6,0.82)"; ctx.fillRect(8, 8, 194, 16);
+  ctx.strokeStyle = "#4a4335"; ctx.lineWidth = 1; ctx.strokeRect(8.5, 8.5, 193, 15);
+  const blink = g.iframe > 0 && (Math.floor(g.anim * 18) % 2);
+  const hpr = clamp(g.hp / (g.hp0 || 1), 0, 1);
+  const hpw = Math.round(190 * hpr);
+  ctx.fillStyle = blink ? "#f4ead3" : (g.hp < g.hp0 / 3 ? "#d8483a" : "#74c25f");
+  ctx.fillRect(10, 10, hpw, 12);
+  ctx.fillStyle = "rgba(255,255,255,0.35)"; ctx.fillRect(10, 10, hpw, 4);
+  ctx.fillStyle = "rgba(0,0,0,0.28)"; ctx.fillRect(10, 18, hpw, 4);
+  ctx.fillStyle = "#0a0906";
+  for (let k = 1; k * 20 < g.hp0; k++) {
+    const x = 10 + Math.round(190 * (k * 20) / g.hp0);
+    ctx.fillRect(x, 10, 1, 12);
+  }
+  txt(g.hp + "/" + g.hp0, 208, 22, 14, "#f4ead3", "left");
+
+  // 时间
+  const sec = Math.floor(g.t);
+  const ts = Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0");
+  txt(ts, W / 2, 26, 24, "#f4ead3", "center", true);
+
+  // 级 / 杀
+  txt("级 " + g.level, W - 96, 22, 16, "#f0cf7a", "left", true);
+  txt("杀 " + g.kills, W - 96, 40, 14, "#9d9276", "left");
+
+  // 武器槽
+  {
+    let x = 8;
+    for (let w = 0; w < 7; w++) {
+      const bx = x, by = H - 36;
+      if (!g.wown[w]) {
+        ctx.fillStyle = "rgba(10,9,6,0.55)"; ctx.fillRect(bx, by, 28, 26);
+        ctx.strokeStyle = "#2f2a22"; ctx.strokeRect(bx + 0.5, by + 0.5, 27, 25);
+      } else {
+        const evo = g.wevo[w];
+        ctx.fillStyle = "rgba(10,9,6,0.8)"; ctx.fillRect(bx, by, 28, 26);
+        ctx.strokeStyle = evo ? "#f0cf7a" : WCOLS[w]; ctx.strokeRect(bx + 0.5, by + 0.5, 27, 25);
+        drawWeaponIcon(bx + 14, by + 12, 7, w, evo);
+        for (let k = 0; k < Math.min(5, g.wlvl[w]); k++) {
+          ctx.fillStyle = evo ? "#f0cf7a" : "#f4ead3";
+          ctx.fillRect(bx + 4 + k * 4, by + 21, 3, 2);
+        }
+      }
+      x += 30;
+    }
+  }
+
+  // 经验条
+  ctx.fillStyle = "rgba(10,9,6,0.86)"; ctx.fillRect(0, H - 4, W, 4);
+  const xr = clamp(g.xp / (g.xpneed || 1), 0, 1);
+  ctx.fillStyle = "#6fbfcf"; ctx.fillRect(0, H - 4, Math.round(W * xr), 3);
+  ctx.fillStyle = "#d0f4ff"; ctx.fillRect(0, H - 4, Math.round(W * xr), 1);
+
+  // 棺主血条
+  for (const e of enemies) {
+    if (!e.alive || e.type !== 4) continue;
+    const w = 320, x = (W - w) / 2, y = H - 62;
+    ctx.fillStyle = "rgba(10,9,6,0.82)"; ctx.fillRect(x - 2, y - 2, w + 4, 12);
+    ctx.strokeStyle = "#6a4a80"; ctx.strokeRect(x - 2.5, y - 2.5, w + 4, 12);
+    ctx.fillStyle = "#a05ad0"; ctx.fillRect(x, y, Math.round(w * clamp(e.hp / e.hp0, 0, 1)), 8);
+    txt("棺 主", W / 2, y - 8, 13, "#d8b0f0");
+  }
+
+  // 提示
+  if (g.tipT > 0) {
+    ctx.globalAlpha = Math.min(1, g.tipT / 0.5);
+    txt(g.tip, W / 2, H - 62, 14, "#f0cf7a");
+    ctx.globalAlpha = 1;
+  }
+}
+
+function dim(a) { ctx.fillStyle = "rgba(10,9,6," + a + ")"; ctx.fillRect(0, 0, W, H); }
+
+/* 标题页的球：和 exe 一样直接画，带描边和高光，不做像素放大 */
+function pixelBall(cx, cy, r, col, rim, withEyes) {
+  const gl = ctx.createRadialGradient(cx, cy, r, cx, cy, r * 5);
+  gl.addColorStop(0, "rgba(126,214,224,0.20)");
+  gl.addColorStop(0.5, "rgba(74,169,182,0.07)");
+  gl.addColorStop(1, "rgba(74,169,182,0)");
+  ctx.fillStyle = gl;
+  ctx.beginPath(); ctx.arc(cx, cy, r * 5, 0, TAU); ctx.fill();
+  ball(cx, cy, r, col, rim, true);
+  if (withEyes) eyes(cx, cy, r, 0, 0, false);
+}
+
+function drawOverlay() {
+  if (g.state === "title") {
+    dim(0.88);
+    // 缓缓转的一圈符（和 exe 标题页的浮块同款）
+    for (let k = 0; k < 10; k++) {
+      const a = g.anim * 0.006 + k * 0.628;
+      const sx = W / 2 + Math.cos(a) * 152, sy = 112 + Math.sin(a) * 92;
+      ctx.globalAlpha = 0.30;
+      ctx.fillStyle = "#e4d08a";
+      ctx.fillRect(sx - 3, sy - 6, 6, 12);
+      ctx.globalAlpha = 1;
+    }
+    pixelBall(W / 2, 108, 22, "#4aa9b6", "#2c7a86", true);
+    txt("夜 行 圆 球", W / 2, 166, 34, "#f0cf7a", "center", true);
+    txt("进化版 · 七样家伙 · 五阶成形", W / 2, 196, 14, "#9d9276");
+    txt("一盏灯，一条路，砍到天亮", W / 2, 228, 17, "#f4ead3");
+    txt("方向走，家伙自己找人，死了重来", W / 2, 258, 14, "#9d9276");
+    txt("捡光点升级，升级时挑一样；某样家伙到五阶，还能进化", W / 2, 282, 14, "#9d9276");
+    if ((g.anim / 1.1) % 2 < 1) txt("按 回车 / 空格 出发", W / 2, 320, 17, "#9ee08a", "center", true);
+    txt("杀掉 6 分钟后的棺主就算通关", W / 2, 358, 12, "#6d6552");
+    txt("W A S D / 方向键 移动 · Esc 暂停 · 也可直接点画面走", W / 2, 382, 12, "#6d6552");
+  }
+
+  if (g.state === "level") {
+    ctx.fillStyle = "#0a0906"; ctx.fillRect(0, 0, W, H);
+    const gl = ctx.createRadialGradient(W / 2, 120, 20, W / 2, 120, 260);
+    gl.addColorStop(0, "rgba(58,47,28,0.55)"); gl.addColorStop(1, "rgba(58,47,28,0)");
+    ctx.fillStyle = gl; ctx.fillRect(0, 0, W, H);
+    txt("升到 " + g.level + " 级，挑一样", W / 2, 52, 26, "#f0cf7a", "center", true);
+    txt("← → 换一张，回车 定下（也可以直接点卡片）", W / 2, 78, 13, "#9d9276");
+
+    for (let i = 0; i < 3; i++) {
+      const c = g.card[i];
+      const x = 30 + i * 194, y = 104, w = 182, h = 210;
+      const sel = i === g.chs;
+      ctx.fillStyle = sel ? "rgba(42,36,24,0.95)" : "rgba(23,20,15,0.92)";
+      ctx.fillRect(x, y, w, h);
+      ctx.strokeStyle = sel ? "#f0cf7a" : "#3d372c";
+      ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+      if (sel) { ctx.strokeStyle = "#8a7440"; ctx.strokeRect(x + 3.5, y + 3.5, w - 7, h - 7); }
+
+      let title = "？", desc = "？", tag = "", iconW = -1, evo = false, iconCol = "#9fa898";
+      if (c.kind === "new") { title = WNAME[c.w]; desc = "新家伙 · 自动出手"; iconW = c.w; iconCol = WCOLS[c.w]; }
+      else if (c.kind === "up") { title = WNAME[c.w]; desc = "第 " + (g.wlvl[c.w] + 1) + " 阶加强"; iconW = c.w; iconCol = WCOLS[c.w]; }
+      else if (c.kind === "evo") { title = WEVONAME[c.w]; desc = "进化 · 换一副打法"; tag = "五阶成形"; iconW = c.w; evo = true; iconCol = "#f0cf7a"; }
+      else { title = ATTRS[c.s].n; desc = ATTRS[c.s].d; iconCol = ATTRS[c.s].c; }
+
+      // 图标
+      if (iconW >= 0) {
+        drawWeaponIcon(x + w / 2, y + 56, 18, iconW, evo);
+      } else {
+        ctx.strokeStyle = iconCol; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(x + w / 2, y + 56, 16, 0, TAU); ctx.stroke();
+        ctx.fillStyle = iconCol; ctx.beginPath(); ctx.arc(x + w / 2, y + 56, 6, 0, TAU); ctx.fill();
+      }
+      if (tag) txt(tag, x + w / 2, y + 92, 12, "#f0cf7a");
+      txt(title, x + w / 2, y + (tag ? 122 : 116), 18, evo ? "#f0cf7a" : "#f4ead3", "center", true);
+      txt(desc, x + w / 2, y + (tag ? 148 : 142), 13, "#9d9276");
+      if (evo) txt("→ 换一副打法，五阶成型", x + w / 2, y + 172, 12, "#c8a44d");
+      if (sel) txt("← 选它 →", x + w / 2, y + h - 14, 13, "#f0cf7a");
+    }
+    txt("当前：" + weaponLine(), W / 2, 344, 12, "#6d6552");
+
+    // 简单示意：底部小提示
+    txt("升到 5 阶再进化，一局最多凑三样", W / 2, 372, 12, "#6d6552");
+  }
+
+  if (g.state === "dead") {
+    dim(0.9);
+    txt("倒 在 半 路", W / 2, 150, 34, "#e05a4a", "center", true);
+    txt("撑了 " + fmtTime(g.t) + " · 砍了 " + g.kills + " 只 · 到 " + g.level + " 级", W / 2, 196, 16, "#f4ead3");
+    txt(weaponLine(), W / 2, 230, 14, "#9d9276");
+    if ((g.anim / 1.1) % 2 < 1) txt("按 回车 / 空格 再来一局", W / 2, 292, 17, "#9ee08a", "center", true);
+  }
+
+  if (g.state === "win") {
+    dim(0.86);
+    txt("夜 路 到 头", W / 2, 150, 34, "#f0cf7a", "center", true);
+    txt("棺主躺下了 · " + fmtTime(g.t) + " · 砍了 " + g.kills + " 只 · " + g.level + " 级", W / 2, 196, 16, "#f4ead3");
+    txt(weaponLine(), W / 2, 230, 14, "#9d9276");
+    if ((g.anim / 1.1) % 2 < 1) txt("按 回车 / 空格 再走一趟", W / 2, 292, 17, "#9ee08a", "center", true);
+  }
+
+  if (g.state === "pause") {
+    dim(0.72);
+    txt("歇 一 会", W / 2, 220, 30, "#f0cf7a", "center", true);
+    txt("Esc 接着走", W / 2, 258, 14, "#9d9276");
+  }
+}
+
+function fmtTime(t) {
+  const sec = Math.floor(t);
+  return Math.floor(sec / 60) + " 分 " + String(sec % 60).padStart(2, "0") + " 秒";
+}
+function weaponLine() {
+  const list = [];
+  for (let w = 0; w < 7; w++) {
+    if (!g.wown[w]) continue;
+    list.push((g.wevo[w] ? WEVONAME[w] : WNAME[w]) + " Lv" + g.wlvl[w]);
+  }
+  return list.length ? list.join(" · ") : "只有剑光";
+}
+
+/* ---------- 手柄 ---------- */
+function pollPad() {
+  if (!navigator.getGamepads) return;
+  g.padX = 0; g.padY = 0;
+  const pads = navigator.getGamepads();
+  for (const pad of pads) {
+    if (!pad) continue;
+    const ax = pad.axes[0] || 0, ay = pad.axes[1] || 0;
+    if (ax < -0.3) g.padX = -1; else if (ax > 0.3) g.padX = 1;
+    if (ay < -0.3) g.padY = -1; else if (ay > 0.3) g.padY = 1;
+    const dp = pad.buttons;
+    if (dp[14] && dp[14].pressed) g.padX = -1;
+    if (dp[15] && dp[15].pressed) g.padX = 1;
+    if (dp[12] && dp[12].pressed) g.padY = -1;
+    if (dp[13] && dp[13].pressed) g.padY = 1;
+    const a = dp[0] && dp[0].pressed, b = dp[1] && dp[1].pressed;
+    if (a && !g.padPrevA) { input.ok = true; audioInit(); }
+    if (b && !g.padPrevB) { input.back = true; }
+    if (!a && g.padPrevA) { }
+    g.padPrevA = a; g.padPrevB = b;
+    break;
+  }
+}
+
+/* ---------- 输入处理（按状态） ---------- */
+function handleInput() {
+  if (input.esc) {
+    if (g.state === "play") g.state = "pause";
+    else if (g.state === "pause") g.state = "play";
+  }
+  if (g.state === "title") {
+    if (input.ok || input.back) newRun();
+  } else if (g.state === "play") {
+    // 无
+  } else if (g.state === "level") {
+    if (input.left) { g.chs = (g.chs + 2) % 3; sfx("ui"); }
+    if (input.right) { g.chs = (g.chs + 1) % 3; sfx("ui"); }
+    if (input.ok) pickCard();
+  } else if (g.state === "dead" || g.state === "win") {
+    if (input.ok) newRun();
+  } else if (g.state === "pause") {
+    if (input.ok) g.state = "play";
+  }
+  clearEdge();
+}
+
+/* ---------- 主循环 ---------- */
+const STEP = 1 / 60;
+let acc = 0, lastT = performance.now();
+function frame(now) {
+  const dtRaw = (now - lastT) / 1000;
+  lastT = now;
+  const dt = Math.min(0.1, dtRaw);
+
+  pollPad();
+  handleInput();
+
+  if (g.state === "play") {
+    acc += dt;
+    let steps = 0;
+    while (acc >= STEP && steps < 6) { update(STEP); acc -= STEP; steps++; }
+  } else {
+    g.anim += dt;
+    if (g.tipT > 0) g.tipT -= dt;
+    if (g.flash > 0) g.flash = Math.max(0, g.flash - dt * 2.4);
+    updateEffects(dt);
+    acc = 0;
+  }
+
+  draw();
+  requestAnimationFrame(frame);
+}
+
+/* ---------- 启动 ---------- */
+(function boot() {
+  genWorld();
+  g.camx = Math.max(0, WT * TS / 2 - W / 2);
+  g.camy = Math.max(0, HT * TS / 2 - H / 2);
+  P.x = WT * TS / 2; P.y = HT * TS / 2;
+  // 标题页背景放一个能看见的小场景
+  const rc = document.getElementById("cv");
+  void rc;
+  requestAnimationFrame(frame);
+})();
+
+</script>
+</body>
+</html>
