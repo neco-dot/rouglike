@@ -222,6 +222,9 @@ function pressAt(p, id) {
         else { g.menu = i; sfx("ui"); }
       }
     }
+    if (p.x >= 186 && p.x <= 454 && p.y >= 380 && p.y <= 414) {
+      g.mapSel = (g.mapSel + 1) % 4; sfx("ui");
+    }
   } else if (g.state === "play") {
     if (p.x < W * 0.54 && p.y > H * 0.44) stickPress(p, id);   // 左下：摇杆
     else { touch.active = true; touch.x = p.x; touch.y = p.y; } // 其余：点哪走哪
@@ -286,7 +289,7 @@ const g = {
   padPrevA: false, padPrevB: false, padA: false, padB: false,
   padX: 0, padY: 0,
   // 模式
-  mode: "road", diff: 0, wave: 1, waveMul: 1, menu: 0, nextBoss: 360, bossT: 0,
+  mode: "road", diff: 0, mapSel: 0, wave: 1, waveMul: 1, menu: 0, nextBoss: 360, bossT: 0,
   banner: "", bannerT: 0, fog: 0, eventT: 0, eventFrenzy: 0, map: 0, mapName: "老宅",
 };
 
@@ -334,6 +337,7 @@ const zones = [];      // 灼烧 / 墨池
 const waves = [];      // 铜锣声波
 const minions = [];    // 灯笼
 const ebullets = [];   // 术士暗器
+const torches = [];    // 地宫壁上的火把
 
 /* PART2 */
 
@@ -347,36 +351,139 @@ const tileAt = (tx, ty) => {
 };
 const solidAt = (x, y) => tileAt(Math.floor(x / TS), Math.floor(y / TS)) !== 0;
 
+/* ---------- 连通域 + 流场：只把怪放在能走到玩家的地上 ---------- */
+const reach = new Uint8Array(WT * HT);
+const flow = new Int16Array(WT * HT);
+function buildField(sx, sy) {
+  reach.fill(0);
+  flow.fill(-1);
+  const tx0 = clamp(Math.floor(sx / TS), 0, WT - 1);
+  const ty0 = clamp(Math.floor(sy / TS), 0, HT - 1);
+  const start = ty0 * WT + tx0;
+  if (world[start] !== 0) return;
+  const q = [start];
+  flow[start] = 0; reach[start] = 1;
+  let head = 0;
+  while (head < q.length) {
+    const cur = q[head++];
+    const cx = cur % WT, cy = (cur - cx) / WT;
+    const d = flow[cur];
+    for (let k = 0; k < 4; k++) {
+      const nx = cx + (k === 0 ? 1 : k === 1 ? -1 : 0);
+      const ny = cy + (k === 2 ? 1 : k === 3 ? -1 : 0);
+      if (nx < 0 || ny < 0 || nx >= WT || ny >= HT) continue;
+      const ni = ny * WT + nx;
+      if (world[ni] !== 0 || flow[ni] >= 0) continue;
+      flow[ni] = d + 1; reach[ni] = 1; q.push(ni);
+    }
+  }
+}
+function flowDir(x, y) {
+  const tx = Math.floor(x / TS), ty = Math.floor(y / TS);
+  if (tx < 0 || ty < 0 || tx >= WT || ty >= HT) return null;
+  const d0 = flow[ty * WT + tx];
+  if (d0 < 0) return null;
+  let bx = tx, by = ty, bd = d0;
+  for (let oy = -1; oy <= 1; oy++) {
+    for (let ox = -1; ox <= 1; ox++) {
+      if (!ox && !oy) continue;
+      const nx = tx + ox, ny = ty + oy;
+      if (nx < 0 || ny < 0 || nx >= WT || ny >= HT) continue;
+      if (solidAt(nx * TS + TS / 2, ny * TS + TS / 2)) continue;
+      if (ox && oy && (solidAt((tx + ox) * TS + TS / 2, ty * TS + TS / 2) ||
+                       solidAt(tx * TS + TS / 2, (ty + oy) * TS + TS / 2))) continue;
+      const d2 = flow[ny * WT + nx];
+      if (d2 < 0 || d2 >= bd) continue;
+      bd = d2; bx = nx; by = ny;
+    }
+  }
+  if (bx === tx && by === ty) return null;
+  const cx = bx * TS + TS / 2, cy = by * TS + TS / 2;
+  const dd = Math.hypot(cx - x, cy - y) || 1;
+  return { x: (cx - x) / dd, y: (cy - y) / dd };
+}
+
 const MAPNAMES = ["老宅", "地宫", "庭院"];
 
 function genWorld(map) {
   world.fill(1);
+  torches.length = 0;
   const rooms = [];
   if (map === 1) {
-    // 地宫：横竖长走廊 + 几个厅
-    for (let i = 0; i < 7; i++) {
-      const y = rndi(8, HT - 14);
-      const x = rndi(6, 20), w = rndi(70, 120);
-      for (let ty = y; ty < y + 3; ty++)
-        for (let tx = x; tx < Math.min(WT - 4, x + w); tx++) world[ty * WT + tx] = 0;
+    // 地宫：四×三 的厅堂网格，横竖走廊连成一张网，正中挖一间大殿
+    torches.length = 0;
+    const M = 10, COLS = 4, ROWS = 3;
+    const CW = Math.floor((WT - M * 2) / COLS), CH = Math.floor((HT - M * 2) / ROWS);
+    for (let ry = 0; ry < ROWS; ry++) {
+      for (let rx = 0; rx < COLS; rx++) {
+        const cx0 = M + rx * CW, cy0 = M + ry * CH;
+        const w = rndi(Math.max(9, CW - 13), CW - 8);
+        const h = rndi(Math.max(8, CH - 12), CH - 7);
+        const x = cx0 + Math.floor((CW - w) / 2) + rndi(-2, 2);
+        const y = cy0 + Math.floor((CH - h) / 2) + rndi(-2, 2);
+        rooms.push({ x, y, w, h });
+        for (let ty = y; ty < y + h; ty++)
+          for (let tx = x; tx < x + w; tx++) world[ty * WT + tx] = 0;
+      }
     }
-    for (let i = 0; i < 6; i++) {
-      const x = rndi(8, WT - 14);
-      const y = rndi(6, 18), h = rndi(60, 96);
-      for (let ty = y; ty < Math.min(HT - 4, y + h); ty++)
-        for (let tx = x; tx < x + 3; tx++) world[ty * WT + tx] = 0;
+    // 横向走廊
+    for (let ry = 0; ry < ROWS; ry++) {
+      for (let rx = 0; rx < COLS - 1; rx++) {
+        const a = rooms[ry * COLS + rx], b = rooms[ry * COLS + rx + 1];
+        const y0 = Math.floor(a.y + a.h / 2) - 1;
+        const x0 = a.x + a.w - 2, x1 = b.x + 1;
+        for (let ty = y0; ty < y0 + 2; ty++)
+          for (let tx = x0; tx <= x1; tx++)
+            if (tx > 1 && tx < WT - 1 && ty > 1 && ty < HT - 1) world[ty * WT + tx] = 0;
+      }
     }
-    for (let i = 0; i < 4; i++) {
-      const w = rndi(9, 15), h = rndi(7, 10);
-      const x = rndi(10, WT - w - 10), y = rndi(10, HT - h - 10);
-      rooms.push({ x, y, w, h });
-      for (let ty = y; ty < y + h; ty++)
-        for (let tx = x; tx < x + w; tx++) world[ty * WT + tx] = 0;
+    // 纵向走廊
+    for (let rx = 0; rx < COLS; rx++) {
+      for (let ry = 0; ry < ROWS - 1; ry++) {
+        const a = rooms[ry * COLS + rx], b = rooms[(ry + 1) * COLS + rx];
+        const x0 = Math.floor(a.x + a.w / 2) - 1;
+        const y0 = a.y + a.h - 2, y1 = b.y + 1;
+        for (let tx = x0; tx < x0 + 2; tx++)
+          for (let ty = y0; ty <= y1; ty++)
+            if (tx > 1 && tx < WT - 1 && ty > 1 && ty < HT - 1) world[ty * WT + tx] = 0;
+      }
     }
-    // 柱子
-    for (let i = 0; i < 40; i++) {
-      const tx = rndi(6, WT - 7), ty = rndi(6, HT - 7);
-      if (world[ty * WT + tx] === 0 && Math.random() < 0.5) world[ty * WT + tx] = 1;
+    // 正中的大殿（中列两格打通）
+    const hall = { x: M + CW + 4, y: M + CH + 3, w: CW * 2 - 14, h: CH - 10 };
+    rooms.push(hall);
+    for (let ty = hall.y; ty < hall.y + hall.h; ty++)
+      for (let tx = hall.x; tx < hall.x + hall.w; tx++) world[ty * WT + tx] = 0;
+    // 柱网：每 6 格一根，靠边的两格留出来
+    for (const r of rooms) {
+      for (let py = r.y + 3; py < r.y + r.h - 3; py += 6) {
+        for (let px = r.x + 3; px < r.x + r.w - 3; px += 6) {
+          if (h2(px, py, 41) % 4 !== 0) continue;
+          world[py * WT + px] = 1;
+        }
+      }
+    }
+    // 柱子：四角靠内各一根（厅够大才立）
+    for (const r of rooms) {
+      if (r.w < 12 || r.h < 9) continue;
+      for (const px of [r.x + 2, r.x + r.w - 3])
+        for (const py of [r.y + 2, r.y + r.h - 3])
+          if (h2(px, py, 33) % 3 === 0) world[py * WT + px] = 1;
+    }
+    // 丘墟：零星塌下来的砖堆
+    for (let i = 0; i < 26; i++) {
+      const r = rooms[rndi(0, rooms.length - 1)];
+      const tx = rndi(r.x + 1, r.x + r.w - 2), ty = rndi(r.y + 1, r.y + r.h - 2);
+      if (h2(tx, ty, 51) % 4 === 0) world[ty * WT + tx] = 1;
+    }
+    // 壁上火把：靠墙的地面格
+    for (let ty = 1; ty < HT - 1 && torches.length < 70; ty++) {
+      for (let tx = 1; tx < WT - 1; tx++) {
+        if (torches.length >= 70) break;
+        if (world[ty * WT + tx] !== 0) continue;
+        if (world[(ty - 1) * WT + tx] !== 1) continue;
+        if (h2(tx, ty, 97) % 9 !== 0) continue;
+        torches.push({ x: tx * TS + TS / 2, y: ty * TS + 3 });
+      }
     }
   } else if (map === 2) {
     // 庭院：一块大空地 + 石柱
@@ -517,13 +624,15 @@ function newRun(item) {
   g.mode = it.mode; g.diff = it.diff;
   const df = DIFFF[g.diff];
 
-  g.map = rndi(0, MAPNAMES.length - 1);
+  const sel = g.mapSel == null ? 0 : g.mapSel;
+  g.map = sel === 3 ? rndi(0, MAPNAMES.length - 1) : sel;
   g.mapName = MAPNAMES[g.map];
   const rooms = genWorld(g.map);
   const r0 = rooms[0];
   P.x = (r0.x + r0.w / 2) * TS;
   P.y = (r0.y + r0.h / 2) * TS;
   P.ang = 0;
+  buildField(P.x, P.y);
 
   enemies.length = 0; bullets.length = 0; pickups.length = 0;
   slashes.length = 0; pulses.length = 0; parts.length = 0; floats.length = 0;
@@ -589,6 +698,8 @@ function spawnAround(type) {
     const x = P.x + Math.cos(a) * d, y = P.y + Math.sin(a) * d;
     if (x < TS + 8 || y < TS + 8 || x > WT * TS - TS - 8 || y > HT * TS - TS - 8) continue;
     if (solidAt(x, y) || solidAt(x + 12, y) || solidAt(x - 12, y)) continue;
+    const ti = Math.floor(y / TS) * WT + Math.floor(x / TS);
+    if (!reach[ti]) continue;
     spawnEnemy(type, x, y);
     return true;
   }
@@ -638,7 +749,8 @@ function bossFallback() {
     const a = rnd(0, TAU), dd = rnd(300, 460);
     const x = clamp(P.x + Math.cos(a) * dd, TS, WT * TS - TS);
     const y = clamp(P.y + Math.sin(a) * dd, TS, HT * TS - TS);
-    if (!solidAt(x, y) && !solidAt(x + 20, y) && !solidAt(x - 20, y)) { spawnEnemy(4, x, y); return true; }
+    const ti = Math.floor(y / TS) * WT + Math.floor(x / TS);
+    if (!solidAt(x, y) && !solidAt(x + 20, y) && !solidAt(x - 20, y) && reach[ti]) { spawnEnemy(4, x, y); return true; }
   }
   return false;
 }
@@ -1160,6 +1272,11 @@ function updateEnemies(dt) {
       const sd = Math.hypot(sx, sy);
       if (sd > 0.1 && sd < e.r + o.r) { vx += sx / sd * 40; vy += sy / sd * 40; }
     }
+    // 前面挡墙就顺着流场绕，别卡在墙角
+    if (e.type !== 9 && (solidAt(e.x + vx * dt * 4, e.y) || solidAt(e.x, e.y + vy * dt * 4))) {
+      const fd = flowDir(e.x, e.y);
+      if (fd) { vx = fd.x * sp; vy = fd.y * sp; }
+    }
     const nx = e.x + vx * dt, ny = e.y + vy * dt;
     if (e.type === 9) { e.x = nx; e.y = ny; }        // 幽灵穿墙
     else {
@@ -1357,6 +1474,8 @@ function update(dt) {
   if (g.state !== "play") { updateEffects(dt); return; }
 
   g.t += dt;
+  g.flowT = (g.flowT || 0) + dt;
+  if (g.flowT > 0.6) { g.flowT = 0; buildField(P.x, P.y); }
   g.eventT = (g.eventT || 0) + dt;
   if (g.eventT > 78 + rnd(0, 18)) { g.eventT = 0; startEvent(); }
 
@@ -1656,6 +1775,35 @@ function draw() {
   } else if (g.map === 2) {     // 庭院：苔绿
     ctx.fillStyle = "rgba(96,120,80,0.09)";
     ctx.fillRect(0, 0, W, H);
+  }
+
+  /* ---------- 壁上的火把 ---------- */
+  for (const tch of torches) {
+    const sx = tch.x - camx, sy = tch.y - camy;
+    if (sx < -60 || sy < -60 || sx > W + 60 || sy > H + 60) continue;
+    const fl = 0.5 + 0.5 * Math.sin(g.anim * 7 + tch.x * 0.3);
+    const gl = ctx.createRadialGradient(sx, sy + 4, 2, sx, sy + 4, 46);
+    gl.addColorStop(0, "rgba(255,182,102," + (0.26 + 0.12 * fl) + ")");
+    gl.addColorStop(0.45, "rgba(224,124,58," + (0.10 + 0.05 * fl) + ")");
+    gl.addColorStop(1, "rgba(180,80,40,0)");
+    ctx.fillStyle = gl;
+    ctx.beginPath(); ctx.arc(sx, sy + 4, 46, 0, TAU); ctx.fill();
+    // 铁架
+    ctx.fillStyle = "#3b2a12";
+    ctx.fillRect(sx - 2.5, sy - 1, 5, 10);
+    ctx.fillStyle = "#6b5126";
+    ctx.fillRect(sx - 3.5, sy + 7, 7, 2);
+    // 火苗
+    ctx.fillStyle = "rgba(255,196,112," + (0.80 + 0.18 * fl) + ")";
+    ctx.beginPath(); ctx.moveTo(sx, sy - 13 - fl * 3);
+    ctx.quadraticCurveTo(sx + 5.5, sy - 2, sx, sy + 2);
+    ctx.quadraticCurveTo(sx - 5.5, sy - 2, sx, sy - 13 - fl * 3);
+    ctx.fill();
+    ctx.fillStyle = "rgba(255,246,214,0.95)";
+    ctx.beginPath(); ctx.moveTo(sx, sy - 7 - fl);
+    ctx.quadraticCurveTo(sx + 2.4, sy - 1, sx, sy + 1);
+    ctx.quadraticCurveTo(sx - 2.4, sy - 1, sx, sy - 7 - fl);
+    ctx.fill();
   }
 
   /* ---------- 主角脚下那盏灯 ---------- */
@@ -2293,9 +2441,16 @@ function drawOverlay() {
       txt(MENU[i].n, W / 2, y, 17, on ? "#f4ead3" : "#9d9276", "center", on);
     }
     const cur = MENU[g.menu] || MENU[0];
-    txt(cur.d, W / 2, 388, 13, "#6d6552");
-    if ((g.anim / 1.1) % 2 < 1) txt("上下 换一项，回车 / 空格 出发", W / 2, 416, 16, "#9ee08a", "center", true);
-    txt("左下摇杆 / WASD / 方向键 走 · 点地也能走 · Esc 暂停", W / 2, 442, 11, "#6d6552");
+    txt(cur.d, W / 2, 372, 13, "#6d6552");
+    const MAPLBL = ["老宅", "地宫", "庭院", "随机"];
+    ctx.fillStyle = "rgba(10,9,6,0.6)";
+    ctx.fillRect(196, 384, 248, 26);
+    ctx.strokeStyle = g.mapSel === 3 ? "#8a7440" : "#3d372c";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(196.5, 384.5, 247, 25);
+    txt("地点  ‹ " + MAPLBL[g.mapSel] + " ›", W / 2, 402, 15, "#f0cf7a", "center", true);
+    if ((g.anim / 1.1) % 2 < 1) txt("上下 换难度 · 左右 换地点 · 回车 出发", W / 2, 428, 15, "#9ee08a", "center", true);
+    txt("左下摇杆 / WASD 走 · 点地也能走 · Esc 暂停", W / 2, 450, 11, "#6d6552");
     return;
   }
 
@@ -2419,6 +2574,8 @@ function handleInput() {
   if (g.state === "title") {
     if (input.up) { g.menu = (g.menu + MENU.length - 1) % MENU.length; sfx("ui"); }
     if (input.down) { g.menu = (g.menu + 1) % MENU.length; sfx("ui"); }
+    if (input.left) { g.mapSel = (g.mapSel + 3) % 4; sfx("ui"); }
+    if (input.right) { g.mapSel = (g.mapSel + 1) % 4; sfx("ui"); }
     if (input.ok || input.back) newRun(MENU[g.menu]);
   } else if (g.state === "play") {
     // 无
