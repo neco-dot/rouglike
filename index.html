@@ -37,7 +37,7 @@
 </head>
 <body>
 <div class="wrap"><canvas id="cv" width="640" height="480"></canvas></div>
-<div class="hint">方向键 / <b>W A S D</b> 移动 · <b>回车</b> 确认 · <b>← →</b> 换卡 · <b>Esc</b> 暂停 · 也可直接点画面走</div>
+<div class="hint">左下<b>摇杆</b> / <b>W A S D</b> 移动 · <b>回车</b> 确认 · <b>← →</b> 换卡 · <b>Esc</b> 暂停</div>
 <script>
 "use strict";
 /* ============================================================
@@ -139,6 +139,30 @@ function sfx(name) {
 const input = { ok: false, back: false, left: false, right: false, up: false, down: false, esc: false };
 const keys = Object.create(null);
 const touch = { active: false, x: 0, y: H / 2 };
+/* 左下虚拟摇杆：按下时底座跟到指头，松开归位 */
+const stick = {
+  id: null, active: false, R: 50, KR: 19,
+  hx: 78, hy: H - 102, bx: 78, by: H - 102, dx: 0, dy: 0, kx: 78, ky: H - 102,
+};
+function stickPress(p, id) {
+  stick.active = true; stick.id = id == null ? -1 : id;
+  stick.bx = clamp(p.x, stick.R + 6, W * 0.5);
+  stick.by = clamp(p.y, stick.R + 6, H - stick.R - 40);
+  stick.dx = 0; stick.dy = 0;
+  stick.kx = stick.bx; stick.ky = stick.by;
+}
+function stickMove(p) {
+  let ox = p.x - stick.bx, oy = p.y - stick.by;
+  const d = Math.hypot(ox, oy), lim = stick.R - 6;
+  if (d > lim) { ox = ox / d * lim; oy = oy / d * lim; }
+  stick.kx = stick.bx + ox; stick.ky = stick.by + oy;
+  const m = Math.min(1, d / lim), a = Math.atan2(oy, ox);
+  stick.dx = Math.cos(a) * m; stick.dy = Math.sin(a) * m;
+}
+function stickRelease() {
+  stick.active = false; stick.id = null; stick.dx = 0; stick.dy = 0;
+  stick.bx = stick.hx; stick.by = stick.hy; stick.kx = stick.hx; stick.ky = stick.hy;
+}
 
 addEventListener("keydown", (e) => {
   const k = e.key;
@@ -157,7 +181,11 @@ addEventListener("keydown", (e) => {
   keys[k] = true;
 }, { passive: false });
 addEventListener("keyup", (e) => { keys[e.key] = false; });
-addEventListener("blur", () => { for (const k in keys) keys[k] = false; touch.active = false; });
+addEventListener("blur", () => {
+  for (const k in keys) keys[k] = false;
+  touch.active = false;
+  if (stick.id !== null) stickRelease();
+});
 
 function localPoint(e) {
   const r = cv.getBoundingClientRect();
@@ -165,11 +193,20 @@ function localPoint(e) {
   const cy = (e.touches ? e.touches[0].clientY : e.clientY) - r.top;
   return { x: cx / r.width * W, y: cy / r.height * H };
 }
-function onPress(e) {
-  if (e.preventDefault) e.preventDefault();
-  audioInit();
-  if (AC && AC.state === "suspended") AC.resume();
-  const p = localPoint(e);
+function touchPoint(t) {
+  const r = cv.getBoundingClientRect();
+  return { x: (t.clientX - r.left) / r.width * W, y: (t.clientY - r.top) / r.height * H };
+}
+function localPoint(e) {
+  const r = cv.getBoundingClientRect();
+  if (e.touches && e.touches.length) {
+    const t = e.touches[0];
+    return { x: (t.clientX - r.left) / r.width * W, y: (t.clientY - r.top) / r.height * H };
+  }
+  const cx = e.clientX - r.left, cy = e.clientY - r.top;
+  return { x: cx / r.width * W, y: cy / r.height * H };
+}
+function pressAt(p, id) {
   input.ok = true;
   if (g.state === "level") {
     for (let i = 0; i < 3; i++) {
@@ -186,22 +223,51 @@ function onPress(e) {
       }
     }
   } else if (g.state === "play") {
-    touch.active = true; touch.x = p.x; touch.y = p.y;
+    if (p.x < W * 0.54 && p.y > H * 0.44) stickPress(p, id);   // 左下：摇杆
+    else { touch.active = true; touch.x = p.x; touch.y = p.y; } // 其余：点哪走哪
   }
 }
+function onPress(e) {
+  if (e.preventDefault) e.preventDefault();
+  audioInit();
+  if (AC && AC.state === "suspended") AC.resume();
+  pressAt(localPoint(e), -1);
+}
 cv.addEventListener("mousedown", onPress);
-cv.addEventListener("touchstart", onPress, { passive: false });
+cv.addEventListener("touchstart", (e) => {
+  e.preventDefault();
+  audioInit();
+  if (AC && AC.state === "suspended") AC.resume();
+  const t = e.changedTouches[0];
+  if (t) pressAt(touchPoint(t), t.identifier);
+}, { passive: false });
 cv.addEventListener("mousemove", (e) => {
+  const p = localPoint(e);
+  if (stick.active && stick.id === -1) { stickMove(p); return; }
   if (!touch.active) return;
-  const p = localPoint(e); touch.x = p.x; touch.y = p.y;
+  touch.x = p.x; touch.y = p.y;
 });
-cv.addEventListener("mouseup", () => { touch.active = false; });
+cv.addEventListener("mouseup", () => { touch.active = false; if (stick.id === -1) stickRelease(); });
 cv.addEventListener("touchmove", (e) => {
   e.preventDefault();
-  const p = localPoint(e); touch.x = p.x; touch.y = p.y;
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    const p = touchPoint(t);
+    if (stick.active && t.identifier === stick.id) stickMove(p);
+    else if (touch.active) { touch.x = p.x; touch.y = p.y; }
+  }
 }, { passive: false });
-cv.addEventListener("touchend", (e) => { e.preventDefault(); touch.active = false; }, { passive: false });
-cv.addEventListener("mouseleave", () => { touch.active = false; });
+function touchEnd(e) {
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    if (stick.active && t.identifier === stick.id) stickRelease();
+  }
+  touch.active = false;
+}
+cv.addEventListener("touchend", (e) => { e.preventDefault(); touchEnd(e); }, { passive: false });
+cv.addEventListener("touchcancel", (e) => { touchEnd(e); }, { passive: false });
+cv.addEventListener("mouseleave", () => { touch.active = false; if (stick.id === -1) stickRelease(); });
+addEventListener("mouseup", () => { if (stick.id === -1) stickRelease(); });
 
 function clearEdge() {
   input.ok = input.back = input.left = input.right = input.up = input.down = input.esc = false;
@@ -504,12 +570,16 @@ const ETYPE = [
 function spawnEnemy(type, x, y) {
   const t = ETYPE[type];
   const df = DIFFF[g.diff];
-  const hpScale = (1 + Math.min(2.2, g.t / 260)) * g.waveMul * df.hp;
+  // 随时间变硬：血量每 70 秒翻一倍，伤害每 5 分钟翻一倍，速度缓慢爬
+  const hpMul = 1 + g.t / 140;
+  const dmgMul = 1 + g.t / 300;
+  const spdMul = 1 + Math.min(0.5, g.t / 700);
+  const hpScale = Math.min(16, hpMul * g.waveMul * df.hp);
   const hp = Math.round(t.hp * hpScale);
   enemies.push({
     x, y, type, r: t.r, col: t.col, hp, hp0: hp,
-    spd: t.spd * (1 + Math.min(0.35, g.t / 900)) * (g.mode === "endless" ? 1 + 0.02 * (g.wave - 1) : 1),
-    dmg: Math.round(t.dmg * df.dmg), slow: 0, slowmul: 1, alive: true, wob: rnd(0, TAU),
+    spd: t.spd * spdMul * (g.mode === "endless" ? 1 + 0.02 * (g.wave - 1) : 1),
+    dmg: Math.round(t.dmg * dmgMul * df.dmg), slow: 0, slowmul: 1, alive: true, wob: rnd(0, TAU),
   });
 }
 
@@ -587,14 +657,19 @@ function moveBy(dx, dy) {
 }
 
 function movePlayer(dt) {
-  let dx = 0, dy = 0;
+  let dx = 0, dy = 0, mag = 1;
   if (keys["ArrowLeft"] || keys["a"] || keys["A"]) dx -= 1;
   if (keys["ArrowRight"] || keys["d"] || keys["D"]) dx += 1;
   if (keys["ArrowUp"] || keys["w"] || keys["W"]) dy -= 1;
   if (keys["ArrowDown"] || keys["s"] || keys["S"]) dy += 1;
   dx += g.padX; dy += g.padY;
 
-  if (!dx && !dy && touch.active) {
+  if (stick.active) {
+    // 摇杆：推多远走多快
+    dx = stick.dx; dy = stick.dy;
+    mag = Math.min(1, Math.hypot(dx, dy));
+    if (mag < 0.10) return;
+  } else if (!dx && !dy && touch.active) {
     const wx = touch.x + g.camx, wy = touch.y + g.camy;
     const d = Math.hypot(wx - P.x, wy - P.y);
     if (d > 12) { dx = (wx - P.x) / d; dy = (wy - P.y) / d; }
@@ -603,7 +678,7 @@ function movePlayer(dt) {
   if (len > 0.001) {
     dx /= len; dy /= len;
     P.ang = Math.atan2(dy, dx);
-    const sp = 104 * g.spdMul * dt;
+    const sp = 104 * g.spdMul * dt * mag;
     moveBy(dx * sp, dy * sp);
   }
 }
@@ -1615,8 +1690,8 @@ function draw() {
       }
     } else {
       const gl = ctx.createRadialGradient(sx, sy, 2, sx, sy, z.r);
-      gl.addColorStop(0, "rgba(40,48,64," + 0.62 * a + ")");
-      gl.addColorStop(0.7, "rgba(32,38,52," + 0.44 * a + ")");
+      gl.addColorStop(0, "rgba(44,52,68," + 0.40 * a + ")");
+      gl.addColorStop(0.7, "rgba(34,40,54," + 0.26 * a + ")");
       gl.addColorStop(1, "rgba(20,24,34,0)");
       ctx.fillStyle = gl;
       ctx.beginPath(); ctx.arc(sx, sy, z.r, 0, TAU); ctx.fill();
@@ -1947,6 +2022,43 @@ function draw() {
     ctx.fillRect(0, 0, W, H);
   }
 
+  /* ---------- 虚拟摇杆 ---------- */
+  if (g.state === "play") {
+    const al = stick.active ? 0.92 : 0.42;
+    const bx = stick.active ? stick.bx : stick.hx;
+    const by = stick.active ? stick.by : stick.hy;
+    ctx.save();
+    ctx.globalAlpha = al;
+    ctx.fillStyle = "rgba(10,9,6,0.55)";
+    ctx.beginPath(); ctx.arc(bx, by, stick.R, 0, TAU); ctx.fill();
+    ctx.strokeStyle = "rgba(240,207,122,0.50)"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(bx, by, stick.R, 0, TAU); ctx.stroke();
+    ctx.strokeStyle = "rgba(244,234,211,0.20)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(bx, by, stick.R - 8, 0, TAU); ctx.stroke();
+    ctx.strokeStyle = "rgba(244,234,211,0.26)";
+    for (let i = 0; i < 4; i++) {
+      const aa = i * Math.PI / 2;
+      ctx.beginPath();
+      ctx.moveTo(bx + Math.cos(aa) * (stick.R - 4), by + Math.sin(aa) * (stick.R - 4));
+      ctx.lineTo(bx + Math.cos(aa) * (stick.R + 6), by + Math.sin(aa) * (stick.R + 6));
+      ctx.stroke();
+    }
+    const kx = stick.active ? stick.kx : stick.hx;
+    const ky = stick.active ? stick.ky : stick.hy;
+    const gl = ctx.createRadialGradient(kx, ky, 2, kx, ky, stick.KR + 8);
+    gl.addColorStop(0, "rgba(126,214,224,0.50)");
+    gl.addColorStop(1, "rgba(74,169,182,0)");
+    ctx.fillStyle = gl;
+    ctx.beginPath(); ctx.arc(kx, ky, stick.KR + 8, 0, TAU); ctx.fill();
+    ctx.fillStyle = "#4aa9b6";
+    ctx.beginPath(); ctx.arc(kx, ky, stick.KR, 0, TAU); ctx.fill();
+    ctx.strokeStyle = "#17474f"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(kx, ky, stick.KR, 0, TAU); ctx.stroke();
+    ctx.fillStyle = "rgba(255,255,255,0.72)";
+    ctx.beginPath(); ctx.arc(kx - 5, ky - 6, 3.2, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+
   drawHUD();
   drawOverlay();
 }
@@ -2087,7 +2199,11 @@ function drawHUD() {
 
   txt("级 " + g.level, W - 96, 22, 16, "#f0cf7a", "left", true);
   txt("杀 " + g.kills, W - 96, 40, 14, "#9d9276", "left");
-  txt(g.mapName, W - 96, 56, 12, "#6d6552", "left");
+  txt(g.mapName, W - 96, 54, 12, "#6d6552", "left");
+  {
+    const enh = Math.min(16, 1 + g.t / 140);
+    txt("怪强化 ×" + enh.toFixed(1), W - 96, 70, 10, enh > 2.5 ? "#d8483a" : "#7f7458", "left");
+  }
 
   {
     let x = 8;
@@ -2179,7 +2295,7 @@ function drawOverlay() {
     const cur = MENU[g.menu] || MENU[0];
     txt(cur.d, W / 2, 388, 13, "#6d6552");
     if ((g.anim / 1.1) % 2 < 1) txt("上下 换一项，回车 / 空格 出发", W / 2, 416, 16, "#9ee08a", "center", true);
-    txt("方向键 / WASD 走，家伙自己找人 · Esc 暂停 · 也可点画面走", W / 2, 442, 11, "#6d6552");
+    txt("左下摇杆 / WASD / 方向键 走 · 点地也能走 · Esc 暂停", W / 2, 442, 11, "#6d6552");
     return;
   }
 
