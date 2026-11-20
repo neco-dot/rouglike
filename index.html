@@ -311,7 +311,7 @@ const g = {
 
 const P = { x: 0, y: 0, r: 10, ang: 0, dirX: 0, dirY: 0 };
 
-const VER = "0.9.5";
+const VER = "0.9.6";
 const SKINS = [
   { n: "青衣", c1: "#2c7a86", c2: "#1a4d57", trim: "#d9b96a", sash: "#b8443a", jade: "#7fd6c0" },
   { n: "白衣", c1: "#dcd6c4", c2: "#b3ac98", trim: "#6a8ab0", sash: "#3f6a8a", jade: "#9fd8e8" },
@@ -319,7 +319,7 @@ const SKINS = [
   { n: "墨衣", c1: "#3c4250", c2: "#23262e", trim: "#9aa8b8", sash: "#8a3a3a", jade: "#bfe0ff" },
 ];
 const NEWS = [
-  "剑光刀光只扫几怪",
+  "删掉击退，怪能进缝",
   "道袍重做，四套衣装",
   "草人泥俑铜钱精",
   "纸人之外另有五怪",
@@ -941,14 +941,6 @@ function addZone(x, y, r, life, kind) {
   zones.push({ x, y, r, life, max: life, kind, tick: 0 });
 }
 
-function knockBack(e, fromX, fromY, power) {
-  const dx = e.x - fromX, dy = e.y - fromY;
-  const d = Math.hypot(dx, dy) || 1;
-  const nx = e.x + dx / d * power, ny = e.y + dy / d * power;
-  if (!solidAt(nx, e.y)) e.x = nx;
-  if (!solidAt(e.x, ny)) e.y = ny;
-}
-
 function fireWeapon(w) {
   const l = g.wlvl[w];
   const evo = g.wevo[w];
@@ -979,7 +971,6 @@ function fireWeapon(w) {
     cand.sort((a, b) => a.d - b.d);
     for (const c of cand.slice(0, cap)) {
       damageEnemy(c.e, dmg);
-      knockBack(c.e, P.x, P.y, evo ? 26 : 20);
       addParts(c.e.x, c.e.y, 4, "#e6f4ff", 90, 2);
     }
     sfx("swing");
@@ -1086,7 +1077,6 @@ function fireWeapon(w) {
       if (!e.alive) continue;
       if (dist2(e.x, e.y, P.x, P.y) < (reach + e.r) * (reach + e.r)) {
         damageEnemy(e, dmg);
-        knockBack(e, P.x, P.y, evo ? 26 : 16);
         if (evo) { e.slow = 0.8; e.slowmul = 0.75; }
       }
     }
@@ -1167,7 +1157,6 @@ function fireWeapon(w) {
     cand.sort((a, b) => a.d - b.d);
     for (const c of cand.slice(0, cap)) {
       damageEnemy(c.e, dmg);
-      knockBack(c.e, P.x, P.y, 16);
       heal += dmg * (evo ? 0.34 : 0.20);
       addParts(c.e.x, c.e.y, 6, "#ff4050", 110, 2);
     }
@@ -1297,7 +1286,6 @@ function updateWaves(dt) {
       if (d < w.r + e.r && d > w.r - 26 - e.r) {
         w.hitSet.push(e);
         damageEnemy(e, w.dmg);
-        knockBack(e, w.x, w.y, w.evo ? 24 : 14);
         if (w.evo) { e.slow = 1.2; e.slowmul = 0.4; }
       }
     }
@@ -1502,7 +1490,6 @@ function updateEnemies(dt) {
         continue;
       }
       hurtPlayer(e.dmg);
-      knockBack(e, P.x, P.y, 22);
       if (g.state !== "play") return;
     }
   }
