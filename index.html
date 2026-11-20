@@ -48,6 +48,18 @@
 const W = 640, H = 480, TS = 32, WT = 160, HT = 120;
 const cv = document.getElementById("cv");
 let ctx = cv.getContext("2d");
+/* 复古像素：先画在 2/3 分辨率的小画布，再最近邻放大 */
+const RSC = 0.66;
+const rcv = document.createElement("canvas");
+rcv.width = Math.round(W * RSC); rcv.height = Math.round(H * RSC);
+const rctx = rcv.getContext("2d");
+ctx = rctx;
+ctx.setTransform(RSC, 0, 0, RSC, 0, 0);
+const mctx = cv.getContext("2d");
+const ocv = document.createElement("canvas");
+ocv.width = W; ocv.height = H;
+const octx = ocv.getContext("2d");
+cv.style.imageRendering = "pixelated";
 
 /* ---------- 小工具 ---------- */
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -299,7 +311,7 @@ const g = {
 
 const P = { x: 0, y: 0, r: 10, ang: 0, dirX: 0, dirY: 0 };
 
-const VER = "0.9.2";
+const VER = "0.9.5";
 const SKINS = [
   { n: "青衣", c1: "#2c7a86", c2: "#1a4d57", trim: "#d9b96a", sash: "#b8443a", jade: "#7fd6c0" },
   { n: "白衣", c1: "#dcd6c4", c2: "#b3ac98", trim: "#6a8ab0", sash: "#3f6a8a", jade: "#9fd8e8" },
@@ -307,12 +319,12 @@ const SKINS = [
   { n: "墨衣", c1: "#3c4250", c2: "#23262e", trim: "#9aa8b8", sash: "#8a3a3a", jade: "#bfe0ff" },
 ];
 const NEWS = [
+  "剑光刀光只扫几怪",
   "道袍重做，四套衣装",
   "草人泥俑铜钱精",
   "纸人之外另有五怪",
   "隔墙不锁怪，不刷怪",
-  "剑光吸血刀改斩击",
-  "纸伞挡弹，墨池留潭",
+  "怪物受击带无敌帧",
 ];
 
 const WP_COUNT = 16;
@@ -375,7 +387,7 @@ const tileAt = (tx, ty) => {
 const solidAt = (x, y) => tileAt(Math.floor(x / TS), Math.floor(y / TS)) !== 0;
 
 /* ---------- 连通域 + 流场：只把怪放在能走到玩家的地上 ---------- */
-const reach = new Uint8Array(WT * HT);
+    const reach = new Uint8Array(WT * HT);
 const flow = new Int16Array(WT * HT);
 function buildField(sx, sy) {
   reach.fill(0);
@@ -590,6 +602,8 @@ function addRing(x, y, r, col, life) {
 
 function damageEnemy(e, dmg) {
   if (!e.alive) return;
+  if (e.ifr > 0) return;                       // 无敌帧内不重复吃伤
+  e.ifr = e.type === 4 ? 0.10 : 0.05;
   const v = Math.max(1, Math.round(dmg * g.dmgMul));
   e.hp -= v;
   addFloat(e.x + rnd(-5, 5), e.y - e.r - 5, String(v), "#f4ead3", false);
@@ -713,7 +727,7 @@ function spawnEnemy(type, x, y) {
   enemies.push({
     x, y, type, r: t.r, col: t.col, hp, hp0: hp,
     spd: t.spd * spdMul * (g.mode === "endless" ? 1 + 0.02 * (g.wave - 1) : 1),
-    dmg: Math.round(t.dmg * dmgMul * df.dmg), slow: 0, slowmul: 1, alive: true, wob: rnd(0, TAU),
+    dmg: Math.round(t.dmg * dmgMul * df.dmg), slow: 0, slowmul: 1, alive: true, ifr: 0, wob: rnd(0, TAU),
   });
 }
 
@@ -943,14 +957,16 @@ function fireWeapon(w) {
   if (w === 0) {                                   // 剑光 / 月华斩：正面斩击
     let ang = P.ang;
     if (tgt) ang = Math.atan2(tgt.y - P.y, tgt.x - P.x);
-    const reach = (84 + 8 * l) * (evo ? 1.25 : 1);
-    const cone = evo ? 1.05 : 0.80;
+    const reach = (68 + 6 * l) * (evo ? 1.18 : 1);
+    const cone = evo ? 0.72 : 0.60;
+    const cap = (g.diff >= 1 || (g.mode === "endless" && g.wave >= 2)) ? 3 : 4;
     const dmg = 10 + 7 * l;
     slashes.push({ x: P.x, y: P.y, ang, reach, cone, life: 0.23, max: 0.23, evo, type: "steel" });
     if (evo) {
       slashes.push({ x: P.x, y: P.y, ang: ang - 0.45, reach: reach * 0.92, cone: 0.62, life: 0.23, max: 0.23, evo, type: "steel" });
       slashes.push({ x: P.x, y: P.y, ang: ang + 0.45, reach: reach * 0.92, cone: 0.62, life: 0.23, max: 0.23, evo, type: "steel" });
     }
+    const cand = [];
     for (const e of enemies) {
       if (!e.alive) continue;
       const d = Math.hypot(e.x - P.x, e.y - P.y);
@@ -958,11 +974,13 @@ function fireWeapon(w) {
       let da = Math.atan2(e.y - P.y, e.x - P.x) - ang;
       while (da > Math.PI) da -= TAU;
       while (da < -Math.PI) da += TAU;
-      if (Math.abs(da) <= cone) {
-        damageEnemy(e, dmg);
-        knockBack(e, P.x, P.y, evo ? 26 : 20);
-        addParts(e.x, e.y, 4, "#e6f4ff", 90, 2);
-      }
+      if (Math.abs(da) <= cone) cand.push({ e, d });       // 只留最近几只
+    }
+    cand.sort((a, b) => a.d - b.d);
+    for (const c of cand.slice(0, cap)) {
+      damageEnemy(c.e, dmg);
+      knockBack(c.e, P.x, P.y, evo ? 26 : 20);
+      addParts(c.e.x, c.e.y, 4, "#e6f4ff", 90, 2);
     }
     sfx("swing");
     return;
@@ -1131,10 +1149,12 @@ function fireWeapon(w) {
   if (w === 13) {                                  // 吸血刀 / 血河斩：一记大横斩
     let ang = P.ang;
     if (tgt) ang = Math.atan2(tgt.y - P.y, tgt.x - P.x);
-    const reach = 70 + 7 * l + (evo ? 18 : 0);
-    const cone = evo ? 1.65 : 1.25;
+    const reach = 58 + 5 * l + (evo ? 12 : 0);
+    const cone = evo ? 1.05 : 0.85;
+    const cap = (g.diff >= 1 || (g.mode === "endless" && g.wave >= 2)) ? 3 : 4;
     const dmg = 12 + 7 * l;
     let heal = 0;
+    const cand = [];
     for (const e of enemies) {
       if (!e.alive) continue;
       const d = Math.hypot(e.x - P.x, e.y - P.y);
@@ -1142,12 +1162,14 @@ function fireWeapon(w) {
       let da = Math.atan2(e.y - P.y, e.x - P.x) - ang;
       while (da > Math.PI) da -= TAU;
       while (da < -Math.PI) da += TAU;
-      if (Math.abs(da) <= cone) {
-        damageEnemy(e, dmg);
-        knockBack(e, P.x, P.y, 16);
-        heal += dmg * (evo ? 0.34 : 0.20);
-        addParts(e.x, e.y, 6, "#ff4050", 110, 2);
-      }
+      if (Math.abs(da) <= cone) cand.push({ e, d });       // 只留最近几只
+    }
+    cand.sort((a, b) => a.d - b.d);
+    for (const c of cand.slice(0, cap)) {
+      damageEnemy(c.e, dmg);
+      knockBack(c.e, P.x, P.y, 16);
+      heal += dmg * (evo ? 0.34 : 0.20);
+      addParts(c.e.x, c.e.y, 6, "#ff4050", 110, 2);
     }
     if (heal >= 1) {
       const add = Math.floor(heal);
@@ -1466,6 +1488,7 @@ function updateEnemies(dt) {
       if (!solidAt(e.x, ny)) e.y = ny;
     }
     e.wob += dt * 3;
+    if (e.ifr > 0) e.ifr -= dt;
 
     // 撞到玩家
     if (g.iframe <= 0 && dist2(e.x, e.y, P.x, P.y) < (e.r + P.r) * (e.r + P.r)
@@ -1856,10 +1879,26 @@ function eyes(x, y, r, followX, followY, dark) {
 
 /* ---------- 主绘制 ---------- */
 function draw() {
+  octx.clearRect(0, 0, W, H);
+  ctx = rctx;
+  ctx.setTransform(RSC, 0, 0, RSC, 0, 0);
+  drawScene();
+  mctx.clearRect(0, 0, W, H);
+  mctx.imageSmoothingEnabled = false;
+  mctx.drawImage(rcv, 0, 0, W, H);
+  mctx.imageSmoothingEnabled = true;
+  mctx.drawImage(ocv, 0, 0);
+  // 复古扫描线
+  mctx.fillStyle = "rgba(0,0,0,0.055)";
+  for (let yy = 0; yy < H; yy += 3) mctx.fillRect(0, yy, W, 1);
+}
+function drawScene() {
   const camx = g.camx + g.shx;
   const camy = g.camy + g.shy;
 
   if (g.state === "title") {
+    ctx = octx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = "#0a0906";
     ctx.fillRect(0, 0, W, H);
     for (let i = 0; i < 26; i++) {
@@ -1874,6 +1913,8 @@ function draw() {
     ctx.globalAlpha = 1;
     ctx.drawImage(vinTex, 0, 0);
     drawOverlay();
+    ctx = rctx;
+    ctx.setTransform(RSC, 0, 0, RSC, 0, 0);
     return;
   }
 
@@ -2459,8 +2500,12 @@ function draw() {
     ctx.restore();
   }
 
+  ctx = octx;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   drawHUD();
   drawOverlay();
+  ctx = rctx;
+  ctx.setTransform(RSC, 0, 0, RSC, 0, 0);
 }
 
 function shade(hex, k) {
@@ -2700,9 +2745,7 @@ function daoist(sx, sy, t, face, sc, sk) {
   ctx.fillStyle = "#101a20";
   ctx.fillRect(-5.5, 15 + bob, 5, 2); ctx.fillRect(0.5, 15 + bob, 5, 2);
   // 道袍：上身收腰、下摆散开，交领 + 金边 + 云纹
-  const rg = ctx.createLinearGradient(0, -5, 0, 13);
-  rg.addColorStop(0, sk.c1); rg.addColorStop(0.62, sk.c1); rg.addColorStop(1, sk.c2);
-  ctx.fillStyle = rg;
+  ctx.fillStyle = sk.c1;
   // 上身
   ctx.beginPath();
   ctx.moveTo(-6.5, -3 + bob); ctx.lineTo(6.5, -3 + bob);
@@ -2753,8 +2796,8 @@ function daoist(sx, sy, t, face, sc, sk) {
   }
   ctx.restore();
   // 头
-  ctx.fillStyle = "#f4d7b6";
-  ctx.beginPath(); ctx.arc(0, -7 + bob, 7.4, 0, TAU); ctx.fill();
+  ctx.fillStyle = "#e8cfae";
+  ctx.beginPath(); ctx.arc(0, -7 + bob, 7.2, 0, TAU); ctx.fill();
   // 头发（后，只包上缘，露出整张脸）
   ctx.fillStyle = "#241c1a";
   ctx.beginPath(); ctx.arc(0, -7.4 + bob, 7.9, Math.PI * 1.16, Math.PI * 1.84); ctx.fill();
@@ -2780,17 +2823,10 @@ function daoist(sx, sy, t, face, sc, sk) {
   ctx.fillStyle = "#d9b96a"; ctx.beginPath(); ctx.arc(0, -16.8 + bob, 1.3, 0, TAU); ctx.fill();
   // 眼
   ctx.fillStyle = "#1a1614";
-  ctx.beginPath(); ctx.ellipse(-3.1, -6.2 + bob, 1.75, 2.25, 0, 0, TAU); ctx.fill();
-  ctx.beginPath(); ctx.ellipse(3.1, -6.2 + bob, 1.75, 2.25, 0, 0, TAU); ctx.fill();
-  ctx.fillStyle = "rgba(255,255,255,0.92)";
-  ctx.beginPath(); ctx.arc(-3.6, -7 + bob, 0.62, 0, TAU); ctx.fill();
-  ctx.beginPath(); ctx.arc(2.6, -7 + bob, 0.62, 0, TAU); ctx.fill();
+  ctx.fillRect(-3.4, -7.2 + bob, 2, 3);
+  ctx.fillRect(1.4, -7.2 + bob, 2, 3);
   ctx.fillStyle = "#8e5b46";
-  ctx.fillRect(-2.4, -3.4 + bob, 4.6, 0.9);
-  // 腮红
-  ctx.fillStyle = "rgba(214,120,104,0.30)";
-  ctx.beginPath(); ctx.arc(-4.6, -3.6 + bob, 1.5, 0, TAU); ctx.fill();
-  ctx.beginPath(); ctx.arc(4.6, -3.6 + bob, 1.5, 0, TAU); ctx.fill();
+  ctx.fillRect(-1, -3.2 + bob, 2, 0.8);
   // 胸前黄符
   ctx.save(); ctx.translate(-0.3, 4.6 + bob); ctx.rotate(-0.06);
   ctx.fillStyle = "#e6cf86"; ctx.fillRect(-2.2, 0, 4.4, 6.6);
@@ -2876,11 +2912,11 @@ function daoistPortrait(cx, cy, h, sk) {
   ctx.beginPath(); ctx.arc(7, -12, 3.4, 0, TAU); ctx.fill();
   // 眼睛（大）
   ctx.fillStyle = "#221a18";
-  ctx.beginPath(); ctx.ellipse(-5.4, -15, 3, 4.2, 0, 0, TAU); ctx.fill();
-  ctx.beginPath(); ctx.ellipse(5.4, -15, 3, 4.2, 0, 0, TAU); ctx.fill();
-  ctx.fillStyle = "rgba(255,255,255,0.95)";
-  ctx.beginPath(); ctx.arc(-6.4, -16.4, 1.2, 0, TAU); ctx.fill();
-  ctx.beginPath(); ctx.arc(4.4, -16.4, 1.2, 0, TAU); ctx.fill();
+  ctx.fillRect(-7, -18, 3.6, 6);
+  ctx.fillRect(3.4, -18, 3.6, 6);
+  ctx.fillStyle = "rgba(255,255,255,0.75)";
+  ctx.fillRect(-6.4, -17, 1, 1.4);
+  ctx.fillRect(4, -17, 1, 1.4);
   ctx.fillStyle = "rgba(180,110,90,0.9)";
   ctx.fillRect(-3.2, -7.6, 6.4, 1.4);
   // 前发（分缝）
