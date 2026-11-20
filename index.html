@@ -295,6 +295,14 @@ const g = {
 
 const P = { x: 0, y: 0, r: 10, ang: 0, dirX: 0, dirY: 0 };
 
+const VER = "0.6.2";
+const NEWS = [
+  "十三样家伙，各有进化",
+  "无尽波次，怪随时变硬",
+  "三张图可选，地宫重做",
+  "摇杆 / 键鼠 / 手柄都能走",
+];
+
 const WP_COUNT = 13;
 const WNAME = ["剑光", "铜钱镖", "符纸环绕", "长明灯", "铜铃", "纸鹤", "墨滴",
                "火折子", "纸伞", "铜锣", "墨池", "针雨", "灯笼"];
@@ -2428,6 +2436,28 @@ function drawOverlay() {
     pixelBall(W / 2, 82, 18, "#4aa9b6", "#2c7a86", true);
     txt("夜 行 圆 球", W / 2, 140, 32, "#f0cf7a", "center", true);
     txt("进化版 · 十三样家伙 · 五阶成形", W / 2, 166, 13, "#9d9276");
+    // 公告板（左下）
+    {
+      const bx = 14, by = 250, bw = 146, bh = 168;
+      ctx.fillStyle = "rgba(10,9,6,0.72)";
+      ctx.fillRect(bx, by, bw, bh);
+      ctx.strokeStyle = "#3d372c"; ctx.lineWidth = 1;
+      ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
+      ctx.fillStyle = "#f0cf7a";
+      ctx.fillRect(bx + 8, by + 9, 3, 9);
+      txt("公 告", bx + 16, by + 18, 12, "#f0cf7a", "left", true);
+      txt("v" + VER, bx + bw - 8, by + 18, 10, "#6d6552", "right");
+      ctx.fillStyle = "#3d372c";
+      ctx.fillRect(bx + 8, by + 26, bw - 16, 1);
+      for (let i = 0; i < NEWS.length; i++) {
+        txt(NEWS[i], bx + 9, by + 46 + i * 26, 10, "#9d9276", "left");
+        if (i < NEWS.length - 1) {
+          ctx.fillStyle = "rgba(240,207,122,0.14)";
+          ctx.fillRect(bx + 9, by + 53 + i * 26, bw - 18, 1);
+        }
+      }
+      txt("11.19 更新", bx + 9, by + bh - 10, 9, "#4f4736", "left");
+    }
 
     for (let i = 0; i < MENU.length; i++) {
       const y = 244 + i * 34;
@@ -2519,6 +2549,7 @@ function drawOverlay() {
     txt("歇 一 会", W / 2, 206, 30, "#f0cf7a", "center", true);
     txt(modeLine(), W / 2, 236, 13, "#9d9276");
     txt("Esc 接着走", W / 2, 266, 14, "#9d9276");
+    txt("夜行圆球  v" + VER, W - 14, H - 12, 10, "#4f4736", "right");
   }
 }
 
